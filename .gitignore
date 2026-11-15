@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# secrets and local config
+.env
+.env.*
+!.env.example
+deploy/secrets/
+
+# local data: never commit images, videos, queues or databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+/data/
+/evidence/
+/test-videos/
+*.mp4
+*.avi
+
+.claude/settings.local.json
+.idea/
+.vscode/
