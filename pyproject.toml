@@ -45,9 +45,16 @@ dev = [
     "pip-audit",
 ]
 
-[tool.setuptools.packages.find]
-where = ["server", "workstation", "shared"]
-include = ["ag_*"]
+[tool.setuptools]
+packages = ["ag_shared", "ag_workstation", "ag_server"]
+
+[tool.setuptools.package-dir]
+ag_shared = "shared/ag_shared"
+ag_workstation = "workstation/ag_workstation"
+ag_server = "server/ag_server"
+
+[tool.setuptools.package-data]
+"*" = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -76,3 +83,9 @@ select = ["E", "F", "W", "I", "B", "UP", "N", "S", "C4", "SIM", "RUF"]
 python_version = "3.11"
 strict = true
 files = ["server", "workstation", "shared", "tests"]
+mypy_path = ["shared", "workstation", "server"]
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["cv2", "cv2.*", "mediapipe", "mediapipe.*", "win32api", "win32crypt", "win32service", "win32serviceutil", "win32event", "servicemanager", "pywintypes"]
+ignore_missing_imports = true

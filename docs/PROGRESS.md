@@ -4,7 +4,7 @@ Tick a task only when its acceptance criteria in `PLAN.md` are met, the
 quality gate passes and the work is committed.
 
 ## Phase 1: Detection prototype
-- [ ] 1.1 Tooling and package skeletons (helper)
+- [x] 1.1 Tooling and package skeletons (helper)
 - [ ] 1.2 Shared domain and config models (architect)
 - [ ] 1.3 Camera capture layer (builder)
 - [ ] 1.4 Landmarks and signal extraction (architect)
@@ -99,3 +99,4 @@ checks the owner must do.
 | Date | Task | Note |
 |---|---|---|
 | 2026-11-15 | Setup | Design docs, plan and agents created. No application code. Owner decisions D1-D11 and assumptions A1-A13 are in `risks-open-questions.md`. |
+| 2026-11-15 | 1.1 | weasyprint installs but fails to import on this machine: it needs the GTK/Pango runtime DLLs (libgobject-2.0-0.dll) and the loader looks in `C:\Program Files\Tesseract-OCR`. PDF export (server, later phase) needs the GTK3 runtime installed and on PATH; not needed until reports work. Also: mediapipe pulls in opencv-contrib-python next to opencv-python (both installed, no conflict seen). Coverage `fail_under` left out: the tree is empty (100% trivially) and the 80% target applies to business logic only, so a global gate would mislead. |
