@@ -244,3 +244,12 @@ def test_held_camera_counts_towards_degraded() -> None:
     tracker = DegradedTracker()
     tracker.update(0.0, [_held(1, A.ATTENTIVE)])
     assert tracker.update(30.5, [_held(1, A.ATTENTIVE)]) == (1,)
+
+
+def test_rule5_ignores_a_face_camera_whose_own_candidate_still_says_absent() -> None:
+    lagging = cand(1, A.ABSENT, face=True)
+    fused = fuse([lagging, cand(2, A.ATTENTIVE)], primary_slot=1, ts=1.0)
+    assert fused.state is A.ATTENTIVE
+    assert fused.source_slots == (2,)
+    # With no other face camera the normal rules decide.
+    assert fuse([lagging], primary_slot=1, ts=1.0).state is A.ABSENT

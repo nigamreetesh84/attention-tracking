@@ -96,7 +96,9 @@ def fuse(
         return result(A.UNKNOWN, 0.0, False, ())
 
     # Rule 5: someone is visibly at the station.
-    face_cams = [c for c in usable if c.face_seen]
+    # A camera that sees a face cannot vouch for Absent, even if its own
+    # candidate has not caught up yet, so such candidates are left out.
+    face_cams = [c for c in usable if c.face_seen and c.state is not A.ABSENT]
     if face_cams and any(c.state is A.ABSENT for c in usable):
         state, confidence, low, slots = _combine(face_cams)
         return result(state, confidence, low, slots)

@@ -234,8 +234,9 @@ class CameraEstimator:
                 return make(A.UNKNOWN, 0.0)
             return self._hold(f, quality, good=False, face_seen=False)
 
-        # 2. Absent.
-        if self._absent.exceeds(t.absent_seconds):
+        # 2. Absent. Never on a frame that shows the person: the timer's gap
+        # tolerance bridges brief detection drop-outs, not a returning worker.
+        if not person and self._absent.exceeds(t.absent_seconds):
             return make(A.ABSENT, q)
 
         # 3. Sleeping.

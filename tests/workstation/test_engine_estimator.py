@@ -314,3 +314,9 @@ def test_candidate_carries_the_signal_snapshot() -> None:
     candidate = est.update(frame)
     assert isinstance(candidate.frame, SignalFrame)
     assert candidate.frame.ts == 0.0
+
+
+def test_absent_ends_on_the_first_frame_that_shows_the_face() -> None:
+    out = _run([(NO_FACE, 12.0), (ATTENTIVE, 0.3)])
+    assert _state_at(out, 11.9) is A.ABSENT
+    assert _state_at(out, 12.0) is not A.ABSENT
