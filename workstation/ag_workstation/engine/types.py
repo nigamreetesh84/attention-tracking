@@ -15,10 +15,11 @@ from ag_shared.states import AttentionState
 class CameraCandidate:
     """One camera's candidate state at one moment.
 
-    `usable` means the camera produced a good-quality frame recently and its
-    candidate is not Unknown (fusion rule 1). `face_seen` means the latest
-    frame held a good-quality face, which rules out Absent for the whole
-    station (fusion rule 5).
+    `usable` means the candidate is not Unknown: the camera is still trusted,
+    possibly holding its last state through a short bad-quality burst.
+    `quality_ok` means the latest frame itself was good enough; fusion
+    prefers such cameras (rules 1-2). `face_seen` means the latest frame held
+    a good-quality face, which rules out Absent for the station (rule 5).
     """
 
     slot: int
@@ -28,6 +29,7 @@ class CameraCandidate:
     quality: float | None
     usable: bool
     face_seen: bool
+    quality_ok: bool = True
     fallback: bool = False
     """The eye signals were unreadable and head-pose rules were used instead."""
     frame: SignalFrame | None = field(default=None, compare=False)
@@ -44,6 +46,7 @@ class CameraCandidate:
             quality=quality,
             usable=False,
             face_seen=False,
+            quality_ok=False,
         )
 
 

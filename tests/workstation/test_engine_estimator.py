@@ -76,7 +76,7 @@ def test_short_bad_quality_burst_holds_previous_state() -> None:
     out = _run([(ATTENTIVE, 1.0), (DARK, 1.0), (ATTENTIVE, 1.0)])
     assert _states(out) == {A.ATTENTIVE}
     held = [c for c in out if 1.0 <= c.ts < 2.0]
-    assert all(not c.usable for c in held)
+    assert all(c.usable and not c.quality_ok for c in held)
 
 
 def test_absent_after_absent_seconds_without_a_face() -> None:

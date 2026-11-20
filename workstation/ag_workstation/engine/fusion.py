@@ -4,7 +4,7 @@
 exhaustively over state combinations. Rules:
 
 1. Primary usable and no secondary usable: the primary decides.
-2. Primary not usable: the best-quality usable secondary decides.
+2. Primary Unknown or low quality: the best-quality usable secondary decides.
 3. Primary and secondaries usable and all agree: that state, with the highest
    confidence among them.
 4. They disagree: the most severe state, with `low_confidence` set.
@@ -14,6 +14,11 @@ exhaustively over state combinations. Rules:
    unavailable".
 7. A camera offline or below quality for more than `degraded_after_s` is
    reported as degraded (`DegradedTracker`); fusion continues without it.
+
+"Usable" here means: not Unknown, not offline, and the latest frame of good
+quality. A camera in a short bad-quality burst (its estimator still holds
+the last state, `quality_ok` false) is used only when no camera has a good
+frame, so the station does not drop to Unknown before `unknown_seconds`.
 """
 
 from collections.abc import Collection, Iterable, Sequence
@@ -64,7 +69,9 @@ def fuse(
     if primary_slot not in by_slot:
         raise ValueError("the primary camera has no candidate")
     all_offline = bool(candidates) and all(c.slot in offline_slots for c in candidates)
-    usable = [c for c in candidates if c.usable and c.slot not in offline_slots]
+    trusted = [c for c in candidates if c.usable and c.slot not in offline_slots]
+    good = [c for c in trusted if c.quality_ok]
+    usable = good or trusted
     fused_candidates = tuple(sorted(candidates, key=lambda c: c.slot))
 
     def result(
@@ -130,7 +137,7 @@ class DegradedTracker:
         """Record the cameras' condition at `ts`; return the degraded slots."""
         degraded: list[int] = []
         for c in candidates:
-            bad = c.slot in offline_slots or not c.usable
+            bad = c.slot in offline_slots or not (c.usable and c.quality_ok)
             if not bad:
                 self._bad_since.pop(c.slot, None)
                 continue

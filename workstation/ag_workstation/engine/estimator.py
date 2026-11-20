@@ -221,8 +221,9 @@ class CameraEstimator:
                 state=state,
                 confidence=max(0.0, min(1.0, confidence)),
                 quality=quality,
-                usable=good and state is not A.UNKNOWN,
+                usable=state is not A.UNKNOWN,
                 face_seen=face_seen,
+                quality_ok=good,
                 fallback=fallback,
                 frame=f,
             )
@@ -313,8 +314,9 @@ class CameraEstimator:
             state=previous.state,
             confidence=previous.confidence,
             quality=quality,
-            usable=good and previous.state is not A.UNKNOWN,
+            usable=previous.state is not A.UNKNOWN,
             face_seen=face_seen,
+            quality_ok=good,
             fallback=previous.fallback,
             frame=f,
         )

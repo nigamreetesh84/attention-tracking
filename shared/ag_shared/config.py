@@ -10,6 +10,7 @@ from datetime import time
 from enum import StrEnum
 from typing import Annotated, Self
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
@@ -221,6 +222,15 @@ class EngineConfig(BaseModel):
         if sum(c.role is CameraRole.PRIMARY for c in value) != 1:
             raise ValueError("exactly one camera must be primary")
         return tuple(sorted(value, key=lambda c: c.slot))
+
+    @field_validator("timezone", mode="after")
+    @classmethod
+    def _check_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"unknown IANA timezone {value!r}") from exc
+        return value
 
     @model_validator(mode="after")
     def _check_shifts(self) -> Self:

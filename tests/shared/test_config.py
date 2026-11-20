@@ -334,6 +334,8 @@ def test_thresholds_for_shift() -> None:
         {"thresholds": {"absent_seconds": 0}},
         {"capture": {"jpeg_quality": 500}},
         {"timezone": ""},
+        {"timezone": "Mars/Olympus_Mons"},
+        {"timezone": "../etc/passwd"},
         {"config_version": -1},
         {"blocking_mode": True},
         {"profile": {"kind": "custom"}},

@@ -29,6 +29,7 @@ def cand(
         quality=quality if usable else 0.1,
         usable=usable,
         face_seen=face_seen,
+        quality_ok=usable,
     )
 
 
@@ -212,3 +213,34 @@ def test_rule7_degraded_after_30_seconds() -> None:
     assert tracker.update(100.1, [good, cand(2, A.ATTENTIVE)], offline_slots={1}) == (1,)
     tracker.reset()
     assert tracker.update(200.0, [good, bad]) == ()
+
+
+def _held(slot: int, state: AttentionState) -> CameraCandidate:
+    """A camera in a short bad-quality burst, still holding `state`."""
+    return CameraCandidate(
+        slot=slot,
+        ts=1.0,
+        state=state,
+        confidence=0.8,
+        quality=0.2,
+        usable=True,
+        face_seen=False,
+        quality_ok=False,
+    )
+
+
+def test_held_primary_yields_to_a_good_secondary() -> None:
+    fused = fuse([_held(1, A.SLEEPING), cand(2, A.ATTENTIVE)], primary_slot=1, ts=1.0)
+    assert fused.state is A.ATTENTIVE
+    assert fused.source_slots == (2,)
+
+
+def test_held_cameras_are_used_when_no_camera_has_a_good_frame() -> None:
+    fused = fuse([_held(1, A.DROWSY), cand(2, A.UNKNOWN)], primary_slot=1, ts=1.0)
+    assert fused.state is A.DROWSY
+
+
+def test_held_camera_counts_towards_degraded() -> None:
+    tracker = DegradedTracker()
+    tracker.update(0.0, [_held(1, A.ATTENTIVE)])
+    assert tracker.update(30.5, [_held(1, A.ATTENTIVE)]) == (1,)
