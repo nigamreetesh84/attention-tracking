@@ -68,7 +68,10 @@ class StationPipeline:
         id_factory: Callable[[], UUID] = uuid7,
         estimator_params: EstimatorParams | None = None,
         extraction_params: ExtractionParams | None = None,
+        signal_listener: Callable[[SignalFrame], None] | None = None,
     ) -> None:
+        self._signal_listener = signal_listener
+        """Sees every extracted `SignalFrame` (signal-trace recording)."""
         self._est_params = estimator_params
         self._ext_params = extraction_params
         self._config = config
@@ -155,7 +158,10 @@ class StationPipeline:
         cam = self._cameras.get(result.camera_slot)
         if cam is None or not cam.config.is_enabled:
             return None
-        return cam.estimator.update(cam.extractor.extract(result))
+        signals = cam.extractor.extract(result)
+        if self._signal_listener is not None:
+            self._signal_listener(signals)
+        return cam.estimator.update(signals)
 
     def process_signals(self, frame: SignalFrame) -> CameraCandidate | None:
         """Update one camera's estimate from ready-made signals (trace replay)."""
