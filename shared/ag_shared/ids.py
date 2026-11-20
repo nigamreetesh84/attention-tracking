@@ -44,10 +44,11 @@ class Uuid7Generator:
             else:
                 self._counter = int.from_bytes(self._rand(2), "big") & 0x3FF
             self._last_ms = ms
+            counter = self._counter  # read under the lock: keeps ids ordered
             rand_b = int.from_bytes(self._rand(8), "big") & ((1 << 62) - 1)
         value = (ms & ((1 << 48) - 1)) << 80
         value |= 0x7 << 76
-        value |= (self._counter & _MAX_COUNTER) << 64
+        value |= (counter & _MAX_COUNTER) << 64
         value |= 0b10 << 62
         value |= rand_b
         return UUID(int=value)

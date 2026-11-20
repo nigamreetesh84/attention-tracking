@@ -49,3 +49,23 @@ def test_process_generator_is_thread_safe_and_unique() -> None:
 def test_uuid7_ms_rejects_other_versions() -> None:
     with pytest.raises(ValueError, match="UUIDv7"):
         uuid7_ms(UUID("12345678-1234-4234-8234-123456789abc"))
+
+
+def test_concurrent_ids_from_one_generator_stay_ordered_per_millisecond() -> None:
+    gen = Uuid7Generator(clock_ms=lambda: 42)
+    out: list[UUID] = []
+    lock = threading.Lock()
+
+    def work() -> None:
+        for _ in range(300):
+            value = gen()
+            with lock:
+                out.append(value)
+
+    threads = [threading.Thread(target=work) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    counters = [(v.int >> 64) & 0xFFFF for v in out]
+    assert len(set(counters)) == len(counters)  # no two ids share a counter value

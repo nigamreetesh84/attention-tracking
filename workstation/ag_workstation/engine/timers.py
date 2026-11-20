@@ -14,10 +14,12 @@ _EPS = 1e-9
 class ConditionTimer:
     """How long a condition has held, bridging gaps up to `gap_tolerance_s`.
 
-    `update(ts, True)` extends the run; `False` or `None` (not measured)
-    leaves it alone until the last true frame is more than the gap tolerance
-    old, then the run ends. The duration is measured between the first and
-    the latest true frame, so a gap never adds time that was not observed.
+    `update(ts, True)` extends the run; a `False` or `None` (not measured)
+    frame ends it only when it arrives more than the gap tolerance after the
+    last true frame. Frames that never arrived (dropped under CPU load, a
+    slow camera) are not interruptions: a silence is not evidence against
+    the condition, and a camera that stops altogether goes stale and Unknown
+    elsewhere. The duration runs from the first to the latest true frame.
     """
 
     def __init__(self) -> None:
@@ -32,9 +34,7 @@ class ConditionTimer:
     def update(self, ts: float, condition: bool | None, gap_tolerance_s: float) -> float:
         """Add one frame and return the current run length in seconds (0 = no run)."""
         if condition:
-            if self._start is None or (
-                self._last_true is not None and ts - self._last_true > gap_tolerance_s + _EPS
-            ):
+            if self._start is None:
                 self._start = ts
             self._last_true = ts
         elif self._last_true is not None and ts - self._last_true > gap_tolerance_s + _EPS:

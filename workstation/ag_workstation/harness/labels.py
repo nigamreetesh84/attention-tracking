@@ -49,6 +49,17 @@ class LabelInterval(BaseModel):
 
 TagValue = StrictBool | str
 
+ALLOWED_TAGS: dict[str, frozenset[str] | type[bool]] = {
+    "glasses": bool,
+    "ir_camera": bool,
+    "lighting": frozenset({"low", "normal", "bright", "backlit"}),
+    "age_band": frozenset({"18-30", "30-45", "45-60", "60+"}),
+    "skin_tone_group": frozenset({"I-III", "IV-VI"}),
+    "facial_hair": frozenset({"none", "light", "full"}),
+}
+"""Coarse fairness groups only. A fixed vocabulary keeps names, employee ids
+or free text out of labels, and so out of the committed baseline."""
+
 
 class LabelFile(BaseModel):
     """The ground truth of one recording."""
@@ -72,6 +83,22 @@ class LabelFile(BaseModel):
         # The label points next to itself; no paths, so a label cannot reach elsewhere.
         if Path(value).name != value or value in (".", ".."):
             raise ValueError("video must be a plain file name")
+        return value
+
+    @field_validator("tags")
+    @classmethod
+    def _coarse_tags(cls, value: dict[str, TagValue]) -> dict[str, TagValue]:
+        for key, tag in value.items():
+            allowed = ALLOWED_TAGS.get(key)
+            if allowed is None:
+                raise ValueError(f"tag {key!r} is not allowed; use {sorted(ALLOWED_TAGS)}")
+            if allowed is bool:
+                if not isinstance(tag, bool):
+                    raise ValueError(f"tag {key!r} must be true or false")
+            elif (
+                not isinstance(tag, str) or not isinstance(allowed, frozenset) or tag not in allowed
+            ):
+                raise ValueError(f"tag {key!r} must be one of {sorted(allowed)}")
         return value
 
     @field_validator("intervals")

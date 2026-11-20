@@ -109,6 +109,11 @@ def test_label_file_from_the_design_doc_parses() -> None:
         },
         {"fps": 0},
         {"name": "Ravi"},
+        {"tags": {"worker_name": "Ravi Kumar"}},
+        {"tags": {"employee_id": "E12345"}},
+        {"tags": {"lighting": "Ravi"}},
+        {"tags": {"glasses": "yes"}},
+        {"tags": {"age_band": 34}},
     ],
 )
 def test_invalid_labels_are_rejected(changes: dict[str, object]) -> None:
@@ -372,3 +377,21 @@ def test_cli_uses_the_model_dir_from_the_environment(
     provider = factory(session_config(group_sessions(tmp_path)["s1"]).primary_camera)
     assert provider is not None
     provider.close()
+
+
+def test_replay_ticks_on_time_when_the_primary_drops_out(tmp_path: Path) -> None:
+    from ag_workstation.harness.replay import replay_traces
+
+    write_synthetic_recording(tmp_path, "p", [(ATTENTIVE, 10.0, A.ATTENTIVE)], slot=1, session="s")
+    write_synthetic_recording(
+        tmp_path,
+        "q",
+        [(ATTENTIVE, 10.0, A.ATTENTIVE), (EYES_CLOSED, 10.0, A.SLEEPING)],
+        slot=2,
+        session="s",
+    )
+    # The primary trace ends at 10 s; camera 2 carries on and sees sleep.
+    result = replay_traces("s", group_sessions(tmp_path)["s"])
+    states = [s.state for s in result.predicted]
+    assert states[-1] is A.SLEEPING
+    assert result.predicted[-1].end == 20.0

@@ -2,8 +2,9 @@
 
 Shift and break times are site-local wall times (`docs/schema.md`); the
 engine works in UTC. A shift may cross midnight; `days_of_week` names the day
-it starts on (0 = Monday). Around DST changes the local times are mapped
-with `fold=0`, so a break during a repeated hour applies to the first pass.
+it starts on (0 = Monday). Local times are turned into UTC instants with
+`fold=0` and all comparisons happen in UTC, so around a DST change a break in
+the repeated hour applies to its first pass only.
 """
 
 from dataclasses import dataclass
@@ -46,28 +47,30 @@ class ShiftCalendar:
         return datetime.combine(day, at, tzinfo=self._tz)
 
     def _span(self, day: date, start: time, end: time) -> tuple[datetime, datetime]:
+        """[begin, end) in UTC."""
         begin = self._local(day, start)
         end_day = day if end > start else day + timedelta(days=1)
-        return begin, self._local(end_day, end)
+        return begin.astimezone(UTC), self._local(end_day, end).astimezone(UTC)
 
     def status(self, now_utc: datetime) -> CalendarStatus:
         """The active shift and break at `now_utc` (timezone-aware)."""
         if now_utc.tzinfo is None:
             raise ValueError("now_utc must be timezone-aware")
         local = now_utc.astimezone(self._tz)
+        now = now_utc.astimezone(UTC)
         for day in (local.date(), local.date() - timedelta(days=1)):
             for shift in self._shifts:
                 if day.weekday() not in shift.days_of_week:
                     continue
                 begin, end = self._span(day, shift.start_time, shift.end_time)
-                if not begin <= local < end:
+                if not begin <= now < end:
                     continue
                 for brk in shift.breaks:
                     # A break belongs to its shift: it starts on the shift's
                     # start day, or on the next day if it lies after midnight.
                     brk_day = day if brk.start_time >= shift.start_time else day + timedelta(1)
                     b_begin, b_end = self._span(brk_day, brk.start_time, brk.end_time)
-                    if b_begin <= local < b_end:
-                        return CalendarStatus(shift.id, True, brk.name, end.astimezone(UTC))
-                return CalendarStatus(shift.id, False, None, end.astimezone(UTC))
+                    if b_begin <= now < b_end:
+                        return CalendarStatus(shift.id, True, brk.name, end)
+                return CalendarStatus(shift.id, False, None, end)
         return _NO_SHIFT

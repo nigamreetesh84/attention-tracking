@@ -43,7 +43,7 @@ overall recall.
 
 | | attentive | distracted | drowsy | sleeping | absent | unknown | on_break |
 |---|---|---|---|---|---|---|---|
-| attentive | 6532 | 24 | 170 | 194 | 20 | 0 | 0 |
+| attentive | 6534 | 24 | 170 | 192 | 20 | 0 | 0 |
 | distracted | 52 | 38 | 0 | 0 | 0 | 0 | 0 |
 | drowsy | 120 | 0 | 170 | 0 | 0 | 0 | 0 |
 | sleeping | 366 | 90 | 0 | 264 | 0 | 0 | 0 |

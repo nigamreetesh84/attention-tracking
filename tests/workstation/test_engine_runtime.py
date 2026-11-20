@@ -348,3 +348,108 @@ def test_stop_is_prompt_while_the_tick_thread_runs() -> None:
     started = time.perf_counter()
     engine.stop()
     assert time.perf_counter() - started < 1.0
+
+
+def test_scan_is_unknown_when_stopped_or_stale() -> None:
+    world, clock = World(), _clock()
+    engine = _engine(world, clock)
+    assert engine.scan_decision().state is A.UNKNOWN  # never started
+    engine.start()
+    try:
+        _run(engine, clock, 6.0)
+        assert engine.scan_decision().state is A.ATTENTIVE
+        clock.advance(2.5)  # the tick thread stalls longer than unknown_seconds
+        assert engine.scan_decision().state is A.UNKNOWN
+        engine.tick()  # frames are stale too: the station is Unknown
+        assert engine.scan_decision().state is A.UNKNOWN
+        _run(engine, clock, 0.3)  # fresh frames and ticks
+        assert engine.scan_decision().state is A.ATTENTIVE
+    finally:
+        engine.stop()
+    assert engine.scan_decision().state is A.UNKNOWN
+    assert engine.status().state is A.UNKNOWN
+
+
+def test_episode_and_candidate_queries_never_block() -> None:
+    world, clock = World(), _clock()
+    engine = _engine(world, clock)
+    with engine._lock:
+        started = time.perf_counter()
+        assert engine.open_episode() is None
+        assert engine.latest_candidates() == ()
+        assert time.perf_counter() - started < 0.5
+
+
+def test_hung_camera_thread_is_replaced_with_a_fresh_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world, clock = World(), _clock()
+    made: list[int] = []
+
+    def provider(cam: CameraConfig) -> FakeLandmarkProvider:
+        made.append(cam.slot)
+        return world.provider(cam)
+
+    engine = Engine(
+        engine_config(), provider_factory=provider, feed_factory=world.feed, clock=clock
+    )
+    engine.start()
+    try:
+        stats = engine._stats[1]
+        old_thread = engine._threads[1]
+        stats.busy_since = time.monotonic() - 11.0
+        engine._supervise()
+        assert engine._threads[1] is not old_thread
+        assert made.count(1) == 2
+        assert engine.health().cameras[1].thread_restarts == 1
+        # The abandoned generation's late result is discarded.
+        assert engine._process(frame(1, 1, 0.0), stats.generation - 1) is None
+        # At most two abandoned threads per camera.
+        for _ in range(3):
+            stats.busy_since = time.monotonic() - 11.0
+            engine._supervise()
+        assert stats.abandoned == 2
+    finally:
+        engine.stop()
+
+
+def test_hung_camera_whose_provider_cannot_reload() -> None:
+    world, clock = World(), _clock()
+    calls = {"n": 0}
+
+    def provider(cam: CameraConfig) -> FakeLandmarkProvider:
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise RuntimeError("model gone")
+        return world.provider(cam)
+
+    engine = Engine(
+        engine_config(), provider_factory=provider, feed_factory=world.feed, clock=clock
+    )
+    engine.start()
+    try:
+        engine._stats[1].busy_since = time.monotonic() - 11.0
+        engine._supervise()
+        assert 1 not in engine._providers
+        assert engine.health().cameras[1].model_errors == 1
+    finally:
+        engine.stop()
+
+
+def test_low_frame_rate_is_flagged() -> None:
+    world, clock = World(), _clock()
+    engine = _engine(world, clock)
+    engine.start()
+    try:
+        for i in range(8):  # camera 1 at 1.5 fps, camera 2 at 10 fps
+            ts = clock.monotonic()
+            engine.process_frame(frame(1, i + 1, ts))
+            for j in range(7):
+                engine.process_frame(frame(2, i * 7 + j + 1, clock.monotonic()))
+                clock.advance(0.1)
+            engine.tick()
+        health = engine.health()
+        assert health.cameras[1].low_frame_rate
+        assert not health.cameras[2].low_frame_rate
+    finally:
+        engine.stop()

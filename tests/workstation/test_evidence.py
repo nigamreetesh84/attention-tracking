@@ -10,8 +10,10 @@ from ag_workstation.capture.jpeg import encode_jpeg
 from ag_workstation.capture.types import CaptureError, Frame, Image
 from ag_workstation.engine.fakes import T0
 from ag_workstation.evidence import (
+    AsyncSink,
     BurstAssembler,
     CameraRing,
+    EvidenceBurst,
     EvidenceRings,
     MemorySink,
 )
@@ -224,3 +226,75 @@ def test_jpeg_encoder_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cv2, "imencode", lambda *a: (False, None))
     with pytest.raises(CaptureError, match="JPEG"):
         encode_jpeg(np.zeros((8, 8, 3), dtype=np.uint8), 80)
+
+
+class FailingSink:
+    def __init__(self, fail_first: int) -> None:
+        self.fail_first = fail_first
+        self.bursts: list[object] = []
+
+    def deliver(self, burst: object) -> None:
+        if self.fail_first > 0:
+            self.fail_first -= 1
+            raise OSError("disk full")
+        self.bursts.append(burst)
+
+
+def test_a_failing_sink_loses_only_that_burst() -> None:
+    rings = EvidenceRings((1,), CAP, fake_jpeg)
+    sink = FailingSink(fail_first=1)
+    assembler = BurstAssembler(rings, CAP, sink)
+    feed(rings, (1,), 0.0, 2.05)
+    assembler.request_scan_burst(UUID(int=1), 2.0, primary_slot=1)
+    assembler.request_scan_burst(UUID(int=2), 2.0, primary_slot=1)
+    feed(rings, (1,), 2.1, 4.0)  # both complete on the same frame
+    assert assembler.delivery_errors == 1
+    assert len(sink.bursts) == 1
+    assembler.request_keyframe(UUID(int=3), 3.0, primary_slot=1)
+    assert len(sink.bursts) == 2
+
+
+def test_a_failing_ring_listener_does_not_stop_the_others() -> None:
+    rings = EvidenceRings((1,), CAP, fake_jpeg)
+    seen: list[int] = []
+
+    def broken(frame: object) -> None:
+        raise RuntimeError("bug")
+
+    rings.subscribe(broken)
+    rings.subscribe(lambda f: seen.append(f.seq))
+    feed(rings, (1,), 0.0, 1.05)
+    assert seen == [1, 6, 11]
+    assert rings.listener_errors == 3
+
+
+def test_async_sink_delivers_off_thread_and_never_blocks() -> None:
+    import threading
+
+    gate = threading.Event()
+    threads: list[str] = []
+
+    class SlowSink:
+        def __init__(self) -> None:
+            self.bursts: list[object] = []
+
+        def deliver(self, burst: object) -> None:
+            threads.append(threading.current_thread().name)
+            gate.wait(5)
+            if len(self.bursts) == 0 and len(threads) == 1:
+                self.bursts.append(burst)
+                return
+            raise OSError("write failed")
+
+    inner = SlowSink()
+    sink = AsyncSink(inner, max_queued=2)
+    burst = EvidenceBurst(EVENT, 0.0, ())
+    for _ in range(5):
+        sink.deliver(burst)  # 1 in progress, 2 queued, the rest dropped
+    assert sink.dropped >= 2
+    gate.set()
+    sink.drain()
+    sink.close()
+    assert threads[0] == "evidence-sink"
+    assert sink.delivered == 1
+    assert sink.errors == len(threads) - 1

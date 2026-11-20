@@ -379,3 +379,12 @@ def test_scope_state_table_just_below_each_timer() -> None:
     assert A.SLEEPING not in _pipeline([(ATTENTIVE, 1), (EYES_CLOSED, 4.0)])
     assert A.ABSENT not in _pipeline([(ATTENTIVE, 1), (NO_FACE, 10.0)])
     assert A.UNKNOWN not in _pipeline([(ATTENTIVE, 1), (DARK, 2.0)])
+
+
+def test_recovery_at_low_frame_rate() -> None:
+    sm = machine()
+    for i in range(6):
+        sm.update(fused(i / 1.5, A.SLEEPING), T0)
+    for i in range(6, 12):
+        sm.update(fused(i / 1.5, A.ATTENTIVE), T0)
+    assert sm.state is A.ATTENTIVE

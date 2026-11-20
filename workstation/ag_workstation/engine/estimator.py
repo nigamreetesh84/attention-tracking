@@ -21,7 +21,9 @@ Candidate rules, first match wins:
 
 Between a fault and its timer (a few bad frames, a face that has just left)
 the previous candidate is held rather than reporting Attentive; the timers
-then settle it. All timers bridge gaps up to `gap_tolerance_s`.
+then settle it. A station that has shown nobody yet is Unknown until the
+Absent timer decides. All timers bridge gaps up to `gap_tolerance_s`, and
+frames that never arrived are not interruptions.
 """
 
 from dataclasses import dataclass
@@ -262,8 +264,12 @@ class CameraEstimator:
             weight = max(prof.weight(S.HEAD_YAW), prof.weight(S.HEAD_PITCH))
             return make(A.DISTRACTED, q * weight)
 
-        # Nobody visible yet, but not long enough for Absent: keep the last answer.
-        if not person and self._last is not None:
+        # Nobody visible yet, but not long enough for Absent: keep the last
+        # answer. With no earlier answer (start, new session) nothing is known:
+        # Attentive would claim a face that is not there.
+        if not person:
+            if self._last is None or self._last.state is A.UNKNOWN:
+                return make(A.UNKNOWN, 0.0)
             return self._hold(f, quality, good=True, face_seen=False)
 
         # 6. Attentive.

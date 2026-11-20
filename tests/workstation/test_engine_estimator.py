@@ -320,3 +320,32 @@ def test_absent_ends_on_the_first_frame_that_shows_the_face() -> None:
     out = _run([(NO_FACE, 12.0), (ATTENTIVE, 0.3)])
     assert _state_at(out, 11.9) is A.ABSENT
     assert _state_at(out, 12.0) is not A.ABSENT
+
+
+@pytest.mark.parametrize("fps", [1.5, 1.9, 5.0])
+def test_states_are_detected_at_low_frame_rates(fps: float) -> None:
+    profile = builtin_profile(K.OPEN_FACE)
+    for segments, expected in (
+        ([(ATTENTIVE, 2.0), (EYES_CLOSED, 30.0)], A.SLEEPING),
+        ([(ATTENTIVE, 2.0), (NO_FACE, 30.0)], A.ABSENT),
+        ([(ATTENTIVE, 2.0), (DARK, 30.0)], A.UNKNOWN),
+        ([(ATTENTIVE, 2.0), (LOOKING_AWAY, 30.0)], A.DISTRACTED),
+    ):
+        est = CameraEstimator(1, profile, Thresholds())
+        out = [est.update(f) for f in trace(segments, fps=fps, profile=profile)]
+        assert out[-1].state is expected, (fps, expected)
+
+
+def test_states_are_detected_with_processing_stalls() -> None:
+    # 10 fps with a 0.6 s stall every 3 s (frames dropped, latest-frame-wins).
+    profile = builtin_profile(K.OPEN_FACE)
+    est = CameraEstimator(1, profile, Thresholds())
+    frames = [f for f in trace([(EYES_CLOSED, 60.0)], profile=profile) if (f.ts % 3.0) < 2.4]
+    assert [est.update(f) for f in frames][-1].state is A.SLEEPING
+
+
+def test_empty_station_at_start_is_unknown_until_absent() -> None:
+    out = _run([(NO_FACE, 12.0)])
+    assert _state_at(out, 5.0) is A.UNKNOWN
+    assert not out[0].usable
+    assert out[-1].state is A.ABSENT

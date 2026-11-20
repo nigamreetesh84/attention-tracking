@@ -86,3 +86,20 @@ def test_no_shifts_means_never_a_break() -> None:
     status = ShiftCalendar((), "UTC").status(datetime(2026, 1, 1, tzinfo=UTC))
     assert status.shift_id is None
     assert not status.on_break
+
+
+def test_break_in_the_repeated_dst_hour_applies_to_the_first_pass_only() -> None:
+    shift = Shift(
+        id=DAY,
+        name="Night",
+        start_time=time(0, 0),
+        end_time=time(6, 0),
+        days_of_week=(6,),  # 2026-11-01 is a Sunday; New York falls back at 02:00
+        breaks=(ShiftBreak(name="Tea", start_time=time(1, 15), end_time=time(1, 45)),),
+    )
+    cal = ShiftCalendar((shift,), "America/New_York")
+    first = datetime(2026, 11, 1, 5, 15, tzinfo=UTC)  # 01:15 EDT
+    second = datetime(2026, 11, 1, 6, 15, tzinfo=UTC)  # 01:15 EST, the repeat
+    assert cal.status(first).on_break
+    assert not cal.status(second).on_break
+    assert cal.status(second).shift_id == DAY

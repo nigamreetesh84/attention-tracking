@@ -36,11 +36,16 @@ def test_timer_resets_after_a_gap_longer_than_the_tolerance() -> None:
     assert abs(timer.update(2.7, True, GAP) - 0.1) < 1e-9
 
 
-def test_timer_restarts_when_true_returns_after_a_silent_gap() -> None:
+def test_missing_frames_are_not_an_interruption() -> None:
+    # 1.5 fps, or a stall: no contrary frame arrived, so the run continues.
+    timer = ConditionTimer()
+    for i in range(8):
+        timer.update(i / 1.5, True, GAP)
+    assert timer.exceeds(4.0)
     timer = ConditionTimer()
     timer.update(0.0, True, GAP)
-    timer.update(1.0, True, GAP)  # no frames in between: the gap is too long
-    assert timer.duration == 0.0
+    timer.update(1.0, True, GAP)
+    assert timer.duration == 1.0
 
 
 def test_timer_zero_gap_tolerance_resets_on_any_interruption() -> None:

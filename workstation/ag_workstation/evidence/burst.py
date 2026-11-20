@@ -10,6 +10,8 @@ until they arrive or until their time is clearly past; then it is delivered
 with whatever frames exist and the missing ones listed. Nothing touches disk.
 """
 
+import logging
+import queue
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -19,6 +21,8 @@ from uuid import UUID
 from ag_shared.config import CaptureConfig
 
 from ag_workstation.evidence.ring import EvidenceRings, RingFrame
+
+log = logging.getLogger(__name__)
 
 MAX_PENDING = 32
 """Bound on bursts waiting for post frames; the oldest is delivered early."""
@@ -55,6 +59,56 @@ class EvidenceSink(Protocol):
     def deliver(self, burst: EvidenceBurst) -> None:
         """Take ownership of `burst`."""
         ...
+
+
+class AsyncSink:
+    """Delivers bursts to another sink on its own thread, through a bounded queue.
+
+    Burst assembly runs on camera threads and on the scan path; storing a
+    burst (encrypting, writing) must not slow either. A full queue drops the
+    burst and counts it rather than block. Errors of the inner sink are
+    counted and logged, never raised.
+    """
+
+    def __init__(self, inner: EvidenceSink, *, max_queued: int = 64) -> None:
+        self._inner = inner
+        self._queue: queue.Queue[EvidenceBurst | None] = queue.Queue(maxsize=max_queued)
+        self.dropped = 0
+        self.errors = 0
+        self.delivered = 0
+        self._thread = threading.Thread(target=self._run, name="evidence-sink", daemon=True)
+        self._thread.start()
+
+    def deliver(self, burst: EvidenceBurst) -> None:
+        """Queue `burst`; never blocks."""
+        try:
+            self._queue.put_nowait(burst)
+        except queue.Full:
+            self.dropped += 1
+            log.error("evidence queue full; burst dropped")
+
+    def _run(self) -> None:
+        while True:
+            burst = self._queue.get()
+            if burst is None:
+                return
+            try:
+                self._inner.deliver(burst)
+                self.delivered += 1
+            except Exception as exc:
+                self.errors += 1
+                log.error("evidence sink error (%s)", type(exc).__name__)
+            finally:
+                self._queue.task_done()
+
+    def drain(self) -> None:
+        """Wait until every queued burst was handed on (tests, shutdown)."""
+        self._queue.join()
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Finish the queued bursts and stop the thread."""
+        self._queue.put(None)
+        self._thread.join(timeout)
 
 
 class MemorySink:
@@ -95,6 +149,7 @@ class BurstAssembler:
         self._interval = capture.frame_interval_ms / 1000
         self._lock = threading.Lock()
         self._pending: list[_Pending] = []
+        self.delivery_errors = 0
         rings.subscribe(self._on_frame)
 
     @property
@@ -168,7 +223,15 @@ class BurstAssembler:
         key = self._key_frame(self._rings.snapshot(primary_slot), key_ts)
         images = () if key is None else (BurstImage(key, _offset_ms(key, key_ts), "key"),)
         missing = ("key",) if key is None else ()
-        self._sink.deliver(EvidenceBurst(event_id, key_ts, images, missing))
+        self._hand_over(EvidenceBurst(event_id, key_ts, images, missing))
+
+    def _hand_over(self, burst: EvidenceBurst) -> None:
+        """Give one burst to the sink; a failure loses only that burst."""
+        try:
+            self._sink.deliver(burst)
+        except Exception as exc:
+            self.delivery_errors += 1
+            log.error("evidence sink error (%s)", type(exc).__name__)
 
     def _submit(self, pending: _Pending) -> None:
         ready: list[_Pending] = []
@@ -217,7 +280,7 @@ class BurstAssembler:
         missing = list(p.missing)
         if len(post) < p.post_needed:
             missing.extend(["post"] * (p.post_needed - len(post)))
-        self._sink.deliver(
+        self._hand_over(
             EvidenceBurst(
                 event_id=p.event_id,
                 key_ts=p.key_ts,

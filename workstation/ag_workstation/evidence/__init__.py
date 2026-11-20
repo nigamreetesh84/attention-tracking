@@ -7,6 +7,7 @@ gate and the encrypted local store (tasks 2.2 and 2.5) sit behind the sink.
 """
 
 from ag_workstation.evidence.burst import (
+    AsyncSink,
     BurstAssembler,
     BurstImage,
     EvidenceBurst,
@@ -16,6 +17,7 @@ from ag_workstation.evidence.burst import (
 from ag_workstation.evidence.ring import CameraRing, EvidenceRings, JpegEncoder, RingFrame
 
 __all__ = [
+    "AsyncSink",
     "BurstAssembler",
     "BurstImage",
     "CameraRing",

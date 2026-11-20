@@ -7,6 +7,7 @@ disk here; frames leave the ring only inside an `EvidenceBurst` handed to an
 store them.
 """
 
+import logging
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -22,6 +23,8 @@ JpegEncoder = Callable[[Image, int], bytes]
 layer (`capture.jpeg`), the only place that may import OpenCV."""
 
 _EPS = 1e-6
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +114,7 @@ class EvidenceRings:
             for slot in slots
         }
         self._listeners: list[Callable[[RingFrame], None]] = []
+        self.listener_errors = 0
 
     @property
     def slots(self) -> tuple[int, ...]:
@@ -132,7 +136,12 @@ class EvidenceRings:
             listeners = list(self._listeners) if stored is not None else []
         for listener in listeners:
             assert stored is not None  # noqa: S101 - listeners only when stored
-            listener(stored)
+            try:
+                listener(stored)
+            except Exception as exc:
+                # Runs on a camera thread: one listener's bug must not stop the others.
+                self.listener_errors += 1
+                log.error("evidence ring listener error (%s)", type(exc).__name__)
 
     def snapshot(self, slot: int) -> list[RingFrame]:
         """The frames of camera `slot`, oldest first (empty if unknown)."""

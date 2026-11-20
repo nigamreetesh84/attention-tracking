@@ -80,8 +80,12 @@ Rules:
 - Label what is happening, not what the system should say: an episode starts
   when the eyes close or the head turns, not when the timer would fire. The
   harness measures the delay as latency.
-- Tags are coarse groups only. Never put a name, employee ID or any other
-  identifier in a label; unknown fields are rejected.
+- Tags are coarse groups from a fixed list; anything else is rejected, so a
+  name, employee ID or free text cannot get into a label (or into the
+  committed baseline). Allowed: `glasses` and `ir_camera` (true/false),
+  `lighting` (low, normal, bright, backlit), `age_band` (18-30, 30-45,
+  45-60, 60+), `skin_tone_group` (I-III, IV-VI), `facial_hair` (none,
+  light, full). New groups are added in `harness/labels.py`.
 - Two people label each video independently; differences over 1 s are
   resolved together.
 

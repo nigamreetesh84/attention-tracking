@@ -33,6 +33,9 @@ REPLAY_EPOCH = datetime(2026, 1, 5, 0, 0, tzinfo=UTC)
 
 SignalListener = Callable[[SignalFrame], None]
 
+TICK_S = 0.1
+"""Fusion tick in frame time, the same as the live engine's tick interval."""
+
 
 class VideoReader(Protocol):
     """Reads the frames of one video file in order."""
@@ -113,15 +116,32 @@ def session_config(
 def _run(
     pipeline: StationPipeline,
     feed: Iterator[tuple[float, int, Callable[[], None]]],
-    primary_slot: int,
+    end_s: float,
 ) -> list[tuple[float, AttentionState]]:
-    """Process (ts, slot, step) items in order, ticking after each primary frame."""
+    """Process (ts, slot, step) items in time order and tick every `TICK_S`.
+
+    Ticks run on their own schedule, as in the live engine, so a camera that
+    drops out goes stale and the other cameras or Unknown take over. Frames
+    stamped at or before a tick time are processed before that tick.
+    """
     samples: list[tuple[float, AttentionState]] = []
-    for ts, slot, step in feed:
+    index = 0
+
+    def tick_until(limit: float) -> None:
+        """Tick at every tick time strictly before `limit`."""
+        nonlocal index
+        while True:
+            t = round(index * TICK_S, 6)
+            if t >= limit - 1e-9:
+                return
+            out = pipeline.tick(t, REPLAY_EPOCH + timedelta(seconds=t))
+            samples.append((t, out.status.state))
+            index += 1
+
+    for ts, _slot, step in feed:
+        tick_until(ts)
         step()
-        if slot == primary_slot:
-            out = pipeline.tick(ts, REPLAY_EPOCH + timedelta(seconds=ts))
-            samples.append((ts, out.status.state))
+    tick_until(end_s)
     return samples
 
 
@@ -153,10 +173,8 @@ def replay_traces(
 
             yield relabelled.ts, slot, step
 
-    samples = _run(
-        pipeline, _merge_by_time([stream(r) for r in recordings]), config.primary_camera.slot
-    )
     duration = max(r.label.duration_s for r in recordings)
+    samples = _run(pipeline, _merge_by_time([stream(r) for r in recordings]), duration)
     return ReplayResult(name, timeline_from_samples(samples, duration), duration)
 
 
@@ -200,14 +218,12 @@ def replay_videos(
 
             yield ts, slot, step
 
+    duration = max(r.label.duration_s for r in recordings)
     try:
-        samples = _run(
-            pipeline, _merge_by_time([stream(r) for r in recordings]), config.primary_camera.slot
-        )
+        samples = _run(pipeline, _merge_by_time([stream(r) for r in recordings]), duration)
     finally:
         for provider in providers.values():
             provider.close()
-    duration = max(r.label.duration_s for r in recordings)
     return ReplayResult(name, timeline_from_samples(samples, duration), duration)
 
 
