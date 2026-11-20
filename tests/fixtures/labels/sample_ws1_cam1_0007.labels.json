@@ -1,0 +1,15 @@
+{
+  "video": "ws1_cam1_0007.mp4",
+  "fps": 15,
+  "camera_role": "primary",
+  "ppe_profile": "open_face",
+  "session": "ws1_0007",
+  "tags": {"glasses": false, "lighting": "low", "age_band": "30-45", "skin_tone_group": "IV-VI"},
+  "intervals": [
+    {"start_s": 0.0, "end_s": 41.2, "state": "attentive"},
+    {"start_s": 41.2, "end_s": 50.0, "state": "sleeping"},
+    {"start_s": 50.0, "end_s": 95.5, "state": "attentive"},
+    {"start_s": 95.5, "end_s": 104.0, "state": "distracted"},
+    {"start_s": 104.0, "end_s": 120.0, "state": "attentive"}
+  ]
+}

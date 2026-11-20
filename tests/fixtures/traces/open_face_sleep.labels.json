@@ -1,0 +1,29 @@
+{
+  "video": "open_face_sleep.trace.jsonl",
+  "fps": 5.0,
+  "camera_role": "primary",
+  "camera_slot": 1,
+  "ppe_profile": "open_face",
+  "session": null,
+  "tags": {
+    "glasses": false,
+    "lighting": "normal"
+  },
+  "intervals": [
+    {
+      "start_s": 0.0,
+      "end_s": 20.0,
+      "state": "attentive"
+    },
+    {
+      "start_s": 20.0,
+      "end_s": 28.0,
+      "state": "sleeping"
+    },
+    {
+      "start_s": 28.0,
+      "end_s": 66.0,
+      "state": "attentive"
+    }
+  ]
+}

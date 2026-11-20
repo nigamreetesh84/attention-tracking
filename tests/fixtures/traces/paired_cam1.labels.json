@@ -1,0 +1,29 @@
+{
+  "video": "paired_cam1.trace.jsonl",
+  "fps": 5.0,
+  "camera_role": "primary",
+  "camera_slot": 1,
+  "ppe_profile": "open_face",
+  "session": "paired_two_cameras",
+  "tags": {
+    "glasses": false,
+    "lighting": "normal"
+  },
+  "intervals": [
+    {
+      "start_s": 0.0,
+      "end_s": 40.0,
+      "state": "attentive"
+    },
+    {
+      "start_s": 40.0,
+      "end_s": 48.0,
+      "state": "sleeping"
+    },
+    {
+      "start_s": 48.0,
+      "end_s": 60.0,
+      "state": "attentive"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "video": "open_face_distracted_absent.trace.jsonl",
+  "fps": 5.0,
+  "camera_role": "primary",
+  "camera_slot": 1,
+  "ppe_profile": "open_face",
+  "session": null,
+  "tags": {
+    "glasses": false,
+    "lighting": "low"
+  },
+  "intervals": [
+    {
+      "start_s": 0.0,
+      "end_s": 15.0,
+      "state": "attentive"
+    },
+    {
+      "start_s": 15.0,
+      "end_s": 24.0,
+      "state": "distracted"
+    },
+    {
+      "start_s": 24.0,
+      "end_s": 52.0,
+      "state": "attentive"
+    },
+    {
+      "start_s": 52.0,
+      "end_s": 67.0,
+      "state": "absent"
+    },
+    {
+      "start_s": 67.0,
+      "end_s": 79.0,
+      "state": "attentive"
+    }
+  ]
+}

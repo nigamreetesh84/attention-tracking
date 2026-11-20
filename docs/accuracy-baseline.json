@@ -1,0 +1,151 @@
+{
+  "generated_at": "2026-11-20T00:00:00Z",
+  "source": "trace",
+  "sessions": 9,
+  "duration_s": 819.0,
+  "tolerance_s": 2.0,
+  "states": {
+    "sleeping": {
+      "labelled": 8,
+      "detected": 8,
+      "predicted": 8,
+      "recall": 1.0,
+      "precision": 1.0,
+      "mean_latency_s": 5.7,
+      "max_latency_s": 8.2
+    },
+    "absent": {
+      "labelled": 1,
+      "detected": 1,
+      "predicted": 1,
+      "recall": 1.0,
+      "precision": 1.0,
+      "mean_latency_s": 10.2,
+      "max_latency_s": 10.2
+    },
+    "drowsy": {
+      "labelled": 2,
+      "detected": 2,
+      "predicted": 2,
+      "recall": 1.0,
+      "precision": 1.0,
+      "mean_latency_s": 6.0,
+      "max_latency_s": 12.0
+    },
+    "distracted": {
+      "labelled": 1,
+      "detected": 1,
+      "predicted": 4,
+      "recall": 1.0,
+      "precision": 0.25,
+      "mean_latency_s": 5.2,
+      "max_latency_s": 5.2
+    }
+  },
+  "false_alarms": 0,
+  "attentive_s": 694.0,
+  "false_alarms_per_shift": 0.0,
+  "targets": {
+    "sleeping_recall_above_95": true,
+    "false_alarms_below_2_per_shift": true
+  },
+  "slices": [
+    {
+      "tag": "glasses",
+      "value": "false",
+      "recordings": 7,
+      "recall": {
+        "sleeping": 1.0,
+        "absent": 1.0,
+        "drowsy": 1.0,
+        "distracted": 1.0
+      },
+      "flagged_states": []
+    },
+    {
+      "tag": "glasses",
+      "value": "true",
+      "recordings": 2,
+      "recall": {
+        "sleeping": 1.0,
+        "absent": null,
+        "drowsy": null,
+        "distracted": null
+      },
+      "flagged_states": []
+    },
+    {
+      "tag": "lighting",
+      "value": "bright",
+      "recordings": 1,
+      "recall": {
+        "sleeping": 1.0,
+        "absent": null,
+        "drowsy": null,
+        "distracted": null
+      },
+      "flagged_states": []
+    },
+    {
+      "tag": "lighting",
+      "value": "low",
+      "recordings": 2,
+      "recall": {
+        "sleeping": 1.0,
+        "absent": 1.0,
+        "drowsy": null,
+        "distracted": 1.0
+      },
+      "flagged_states": []
+    },
+    {
+      "tag": "lighting",
+      "value": "normal",
+      "recordings": 6,
+      "recall": {
+        "sleeping": 1.0,
+        "absent": null,
+        "drowsy": 1.0,
+        "distracted": null
+      },
+      "flagged_states": []
+    }
+  ],
+  "confusion": {
+    "attentive": {
+      "attentive": 6532,
+      "sleeping": 194,
+      "distracted": 24,
+      "absent": 20,
+      "drowsy": 170
+    },
+    "sleeping": {
+      "attentive": 366,
+      "sleeping": 264,
+      "distracted": 90
+    },
+    "distracted": {
+      "attentive": 52,
+      "distracted": 38
+    },
+    "absent": {
+      "attentive": 102,
+      "absent": 48
+    },
+    "drowsy": {
+      "drowsy": 170,
+      "attentive": 120
+    }
+  },
+  "session_names": [
+    "attentive_long",
+    "clear_glasses_glare",
+    "helmet_sleep",
+    "mask_sleep",
+    "open_face_distracted_absent",
+    "open_face_drowsy",
+    "open_face_sleep",
+    "paired_two_cameras",
+    "sunglasses_head_drop"
+  ]
+}

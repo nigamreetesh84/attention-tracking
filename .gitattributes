@@ -1,0 +1,4 @@
+# Generated fixtures and the baseline are compared byte for byte by tests;
+# keep LF on every platform (Windows checkouts included).
+tests/fixtures/** text eol=lf
+docs/accuracy-baseline.* text eol=lf

@@ -1,0 +1,29 @@
+{
+  "video": "sunglasses_head_drop.trace.jsonl",
+  "fps": 5.0,
+  "camera_role": "primary",
+  "camera_slot": 1,
+  "ppe_profile": "sunglasses",
+  "session": null,
+  "tags": {
+    "glasses": true,
+    "lighting": "bright"
+  },
+  "intervals": [
+    {
+      "start_s": 0.0,
+      "end_s": 15.0,
+      "state": "attentive"
+    },
+    {
+      "start_s": 15.0,
+      "end_s": 27.0,
+      "state": "sleeping"
+    },
+    {
+      "start_s": 27.0,
+      "end_s": 58.0,
+      "state": "attentive"
+    }
+  ]
+}

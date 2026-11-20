@@ -1,0 +1,14 @@
+{
+  "video": "ws2_cam1_0003.mp4",
+  "fps": 15,
+  "camera_role": "primary",
+  "ppe_profile": "sunglasses",
+  "tags": {"glasses": true, "lighting": "bright", "age_band": "18-30", "skin_tone_group": "I-III"},
+  "intervals": [
+    {"start_s": 0.0, "end_s": 60.0, "state": "attentive"},
+    {"start_s": 60.0, "end_s": 75.0, "state": "absent"},
+    {"start_s": 75.0, "end_s": 140.0, "state": "attentive"},
+    {"start_s": 140.0, "end_s": 158.0, "state": "sleeping"},
+    {"start_s": 158.0, "end_s": 180.0, "state": "attentive"}
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "video": "open_face_drowsy.trace.jsonl",
+  "fps": 5.0,
+  "camera_role": "primary",
+  "camera_slot": 1,
+  "ppe_profile": "open_face",
+  "session": null,
+  "tags": {
+    "glasses": false,
+    "lighting": "normal"
+  },
+  "intervals": [
+    {
+      "start_s": 0.0,
+      "end_s": 15.0,
+      "state": "attentive"
+    },
+    {
+      "start_s": 15.0,
+      "end_s": 30.0,
+      "state": "drowsy"
+    },
+    {
+      "start_s": 30.0,
+      "end_s": 45.0,
+      "state": "attentive"
+    },
+    {
+      "start_s": 45.0,
+      "end_s": 59.0,
+      "state": "drowsy"
+    },
+    {
+      "start_s": 59.0,
+      "end_s": 74.0,
+      "state": "attentive"
+    }
+  ]
+}
