@@ -16,10 +16,13 @@ from ag_shared.api import (
     LocalAlertKind,
     RetentionLocal,
     ScanPayload,
+    SessionMethod,
 )
 from ag_shared.ids import is_uuid7, new_uuid7
 from ag_shared.states import AttentionState, ScanOutcome
+from ag_workstation.auth import CurrentSession
 from ag_workstation.clock import FakeClock
+from ag_workstation.consent import CaptureGate, CapturePermit
 from ag_workstation.engine_api import (
     JPEG_SOI,
     BurstKind,
@@ -36,6 +39,7 @@ from ag_workstation.evidence import (
     EvidenceUnavailableError,
     QueueDiskFullAlert,
     RemovalReason,
+    SaveResult,
     StoredImage,
 )
 from ag_workstation.evidence import store as store_module
@@ -84,6 +88,42 @@ def burst(
         frames=tuple(frames),
         expected_frames=len(frames),
     )
+
+
+class _OpenSession:
+    """A consenting worker logged in long before any test burst."""
+
+    def current(self) -> CurrentSession:
+        return CurrentSession(
+            session_id=new_uuid7(),
+            user_id=new_uuid7(),
+            employee_id="EMP001",
+            display_name="Worker",
+            has_consent=True,
+            preferred_language=None,
+            ppe_profile_id=None,
+            method=SessionMethod.EMPLOYEE_ID_PIN,
+            station_assignment_id=None,
+            started_at=T0 - timedelta(days=1),
+            valid_until=None,
+        )
+
+
+class _NoBundle:
+    def current_bundle(self) -> None:
+        return None
+
+
+_OPEN_GATE = CaptureGate(
+    sessions=_OpenSession(), bundles=_NoBundle(), clock=FakeClock(start_utc=T0)
+)
+
+
+def save(s: EvidenceStore, b: EvidenceBurst, event_id: UUID | None = None) -> SaveResult:
+    """`save_burst` with a permit from an open capture gate (PLAN 2.5)."""
+    permit = _OPEN_GATE.permit(b)
+    assert isinstance(permit, CapturePermit)
+    return s.save_burst(b, event_id, permit=permit)
 
 
 def row(s: EvidenceStore, image_id: UUID) -> StoredImage:
@@ -178,7 +218,7 @@ def _files(root: Path) -> list[Path]:
 
 def test_save_and_read_back(store: EvidenceStore) -> None:
     b = burst(sizes=(SIZE, 1000))
-    result = store.save_burst(b)
+    result = save(store, b)
     assert result.images_withheld is ImagesWithheld.NONE
     assert result.refused == 0
     assert len(result.image_ids) == 2
@@ -203,7 +243,7 @@ def test_save_and_read_back(store: EvidenceStore) -> None:
 
 def test_event_id_override_binds_images(store: EvidenceStore) -> None:
     other = new_uuid7()
-    result = store.save_burst(burst(), other)
+    result = save(store, burst(), other)
     assert result.event_id == other
     assert store.read_for_upload(result.image_ids[0]).headers.event_id == other
 
@@ -217,20 +257,20 @@ def test_empty_burst(store: EvidenceStore) -> None:
         frames=(),
         expected_frames=1,
     )
-    result = store.save_burst(b)
+    result = save(store, b)
     assert result.image_ids == ()
     assert result.images_withheld is ImagesWithheld.NONE
 
 
 def test_builder_burst_round_trip(store: EvidenceStore) -> None:
     b = BurstBuilder(secondary_slots=(2,)).build(new_uuid7(), BurstKind.SCAN_WARNING, T0)
-    result = store.save_burst(b)
+    result = save(store, b)
     assert [store.read_for_upload(i).jpeg for i in result.image_ids] == [f.jpeg for f in b.frames]
 
 
 def test_no_plaintext_jpeg_on_disk(store: EvidenceStore, root: Path) -> None:
     b = burst(sizes=(SIZE, 5000, 300))
-    store.save_burst(b)
+    save(store, b)
     store.close()
     files = [p for p in root.rglob("*") if p.is_file()]
     assert any(p.suffix == ".agev" for p in files)
@@ -248,8 +288,8 @@ def test_files_use_a_derived_key(root: Path) -> None:
 
 
 def test_file_swapped_to_another_id_is_corrupt(store: EvidenceStore, root: Path) -> None:
-    a = store.save_burst(burst()).image_ids[0]
-    b = store.save_burst(burst()).image_ids[0]
+    a = save(store, burst()).image_ids[0]
+    b = save(store, burst()).image_ids[0]
     files = EncryptedImageFiles(root / "images", InMemoryKeyProvider(KEY))
     files.path_for(b).write_bytes(files.path_for(a).read_bytes())
     with pytest.raises(EvidenceCorruptError):
@@ -263,7 +303,7 @@ def test_file_swapped_to_another_id_is_corrupt(store: EvidenceStore, root: Path)
 
 
 def test_hash_mismatch_is_corrupt_and_not_uploaded(store: EvidenceStore, root: Path) -> None:
-    image_id = store.save_burst(burst()).image_ids[0]
+    image_id = save(store, burst()).image_ids[0]
     row = store.image(image_id)
     assert row is not None
     # A file that authenticates for this row but holds other bytes.
@@ -277,7 +317,7 @@ def test_hash_mismatch_is_corrupt_and_not_uploaded(store: EvidenceStore, root: P
 
 
 def test_garbage_and_missing_files_are_corrupt(store: EvidenceStore, root: Path) -> None:
-    a, b = store.save_burst(burst(sizes=(1000, 1000))).image_ids
+    a, b = save(store, burst(sizes=(1000, 1000))).image_ids
     files = EncryptedImageFiles(root / "images", InMemoryKeyProvider(KEY))
     files.path_for(a).write_bytes(b"not an evidence file")
     files.path_for(b).unlink()
@@ -299,9 +339,9 @@ def test_unknown_image_is_unavailable(store: EvidenceStore) -> None:
 
 
 def test_pending_uploads_and_mark_uploaded(store: EvidenceStore, clock: FakeClock) -> None:
-    first = store.save_burst(burst(sizes=(1000, 1000)))
+    first = save(store, burst(sizes=(1000, 1000)))
     clock.advance(1)
-    second = store.save_burst(burst(sizes=(1000,)))
+    second = save(store, burst(sizes=(1000,)))
     pending = [i.image_id for i in store.pending_uploads()]
     assert pending == [*first.image_ids, *second.image_ids]
     assert [i.image_id for i in store.pending_uploads(limit=1)] == [first.image_ids[0]]
@@ -314,8 +354,8 @@ def test_pending_uploads_and_mark_uploaded(store: EvidenceStore, clock: FakeCloc
 
 
 def test_consent_missing_deletes_the_events_images(store: EvidenceStore, root: Path) -> None:
-    keep = store.save_burst(burst(sizes=(1000,)))
-    gone = store.save_burst(burst(sizes=(1000, 1000, 1000)))
+    keep = save(store, burst(sizes=(1000,)))
+    gone = save(store, burst(sizes=(1000, 1000, 1000)))
     assert store.delete_consent_missing(gone.image_ids[1]) == 3
     for image_id in gone.image_ids:
         row = store.image(image_id)
@@ -336,7 +376,7 @@ def test_purge_order_uploaded_then_unsent_then_refuse(
 ) -> None:
     events = []
     for _ in range(5):
-        events.append(store.save_burst(burst()))
+        events.append(save(store, burst()))
         clock.advance(1)
     assert store.stats().bytes_used == 5 * (SIZE + FILE_OVERHEAD)
     # Events 1 and 3 uploaded; event 0 is the oldest unsent.
@@ -344,20 +384,20 @@ def test_purge_order_uploaded_then_unsent_then_refuse(
     store.mark_uploaded(events[3].image_ids[0])
 
     # 1. The oldest uploaded image goes first, not the older unsent one.
-    r = store.save_burst(burst())
+    r = save(store, burst())
     assert r.images_withheld is ImagesWithheld.NONE
     assert row(store, events[1].image_ids[0]).removed_reason is RemovalReason.EVICTED
     assert row(store, events[0].image_ids[0]).present
     assert alerts.calls == []
 
     # 2. Then the next uploaded one.
-    store.save_burst(burst())
+    save(store, burst())
     assert row(store, events[3].image_ids[0]).removed_reason is RemovalReason.EVICTED
     assert row(store, events[0].image_ids[0]).present
     assert alerts.calls == []
 
     # 3. No uploaded images left: the oldest unsent image goes.
-    r = store.save_burst(burst())
+    r = save(store, burst())
     assert r.images_withheld is ImagesWithheld.NONE  # the new event keeps its image
     assert row(store, events[0].image_ids[0]).removed_reason is RemovalReason.DISK_FULL
     assert row(store, events[2].image_ids[0]).present
@@ -372,9 +412,9 @@ def test_purge_order_uploaded_then_unsent_then_refuse(
 def test_burst_larger_than_the_rest_is_refused_last(
     store: EvidenceStore, clock: FakeClock, withheld: Withheld
 ) -> None:
-    old = store.save_burst(burst())
+    old = save(store, burst())
     clock.advance(1)
-    big = store.save_burst(burst(sizes=(SIZE,) * 6))
+    big = save(store, burst(sizes=(SIZE,) * 6))
     # Everything else is purged before any frame of the new event is refused.
     assert big.refused == 1
     assert len(big.image_ids) == 5
@@ -390,8 +430,8 @@ def test_burst_larger_than_the_rest_is_refused_last(
 def test_frame_that_can_never_fit_is_refused_without_loss(
     store: EvidenceStore, alerts: Alerts
 ) -> None:
-    small = store.save_burst(burst())
-    r = store.save_burst(burst(sizes=(MIB + 1,)))
+    small = save(store, burst())
+    r = save(store, burst(sizes=(MIB + 1,)))
     assert r.image_ids == ()
     assert r.images_withheld is ImagesWithheld.DISK_FULL
     assert row(store, small.image_ids[0]).present
@@ -421,7 +461,7 @@ def test_key_frames_are_saved_first(store: EvidenceStore) -> None:
         frames=frames,
         expected_frames=len(frames),
     )
-    r = store.save_burst(b)
+    r = save(store, b)
     assert r.refused == 1
     offsets = [row(store, i).offset_ms for i in r.image_ids]
     # Only the frame farthest from the key frame is dropped; ids stay in burst order.
@@ -444,7 +484,7 @@ def test_free_disk_space_lowers_the_limit(root: Path, clock: FakeClock) -> None:
         min_free_mb=1,
     )
     with s:
-        r = s.save_burst(burst(sizes=(SIZE,) * 4))
+        r = save(s, burst(sizes=(SIZE,) * 4))
         assert r.refused == 1
         assert len(r.image_ids) == 3
 
@@ -461,7 +501,7 @@ def test_unknown_free_space_uses_the_quota(root: Path, clock: FakeClock) -> None
         disk_free=broken,
     )
     with s:
-        assert s.save_burst(burst(sizes=(SIZE,) * 6)).refused == 1
+        assert save(s, burst(sizes=(SIZE,) * 6)).refused == 1
 
 
 def test_enforce_quota_after_the_quota_shrinks(
@@ -470,7 +510,7 @@ def test_enforce_quota_after_the_quota_shrinks(
     with _open(root, clock, mb=2, alerts=alerts, withheld=withheld) as s:
         ids = []
         for _ in range(8):
-            ids.append(s.save_burst(burst()).image_ids[0])
+            ids.append(save(s, burst()).image_ids[0])
             clock.advance(1)
         s.mark_uploaded(ids[5])
         s.set_limits(RetentionLocal(max_disk_mb=1, max_age_days=30))
@@ -494,7 +534,7 @@ def test_enforce_quota_after_the_quota_shrinks(
 def _fill(store: EvidenceStore, clock: FakeClock, n: int = 5) -> list[UUID]:
     ids: list[UUID] = []
     for _ in range(n):
-        ids.extend(store.save_burst(burst()).image_ids)
+        ids.extend(save(store, burst()).image_ids)
         clock.advance(1)
     return ids
 
@@ -505,9 +545,9 @@ def test_alert_once_per_episode_and_again_after_recovery(
     with _open(root, clock, alerts=alerts, alert_min_interval=timedelta(minutes=10)) as s:
         _fill(s, clock)
         for _ in range(4):  # every save now deletes an unsent image
-            s.save_burst(burst())
+            save(s, burst())
             clock.advance(1)
-        s.save_burst(burst(sizes=(MIB + 1,)))  # and one refusal
+        save(s, burst(sizes=(MIB + 1,)))  # and one refusal
         assert len(alerts.calls) == 1
         assert alerts.calls[0]["quota_mb"] == 1
         assert alerts.calls[0]["purged_unsent"] == 1
@@ -515,7 +555,7 @@ def test_alert_once_per_episode_and_again_after_recovery(
         # Recover: uploads acknowledged, consent deletions free space.
         for image in s.pending_uploads():
             s.delete_consent_missing(image.image_id)
-        s.save_burst(burst())  # no loss and under 90%: episode over
+        save(s, burst())  # no loss and under 90%: episode over
         assert not s.stats().disk_full
 
         # A new episode inside the minimum interval does not alert again...
@@ -525,7 +565,7 @@ def test_alert_once_per_episode_and_again_after_recovery(
         # ...but one after recovery and past the interval does.
         for image in s.pending_uploads():
             s.delete_consent_missing(image.image_id)
-        s.save_burst(burst())
+        save(s, burst())
         clock.advance(600)
         _fill(s, clock, 5)
         assert len(alerts.calls) == 2
@@ -596,7 +636,7 @@ def test_metadata_never_dropped_and_alert_queued_once(root: Path, clock: FakeClo
         )
         with s:
             _fill(s, clock, 12)
-            s.save_burst(burst(sizes=(MIB + 1,)))
+            save(s, burst(sizes=(MIB + 1,)))
             s.set_limits(RetentionLocal(max_disk_mb=1, max_age_days=1))
             clock.advance(2 * 86400)
             s.housekeeping()
@@ -631,7 +671,7 @@ def test_failed_rename_leaves_nothing(
         raise OSError(errno.EIO, "simulated crash during rename")
 
     monkeypatch.setattr("ag_workstation.evidence.files.os.replace", crash)
-    r = store.save_burst(burst(sizes=(1000, 1000)))
+    r = save(store, burst(sizes=(1000, 1000)))
     assert r.image_ids == ()
     assert r.refused == 2
     assert r.images_withheld is ImagesWithheld.DISK_FULL
@@ -649,11 +689,11 @@ def test_disk_full_on_write_is_withheld(
         raise OSError(errno.ENOSPC, "No space left on device")
 
     monkeypatch.setattr("ag_workstation.evidence.files.os.fsync", enospc)
-    r = store.save_burst(burst())
+    r = save(store, burst())
     assert r.images_withheld is ImagesWithheld.DISK_FULL
     assert _files(root) == []
     monkeypatch.setattr("ag_workstation.evidence.files.os.fsync", real_fsync)
-    assert store.save_burst(burst()).images_withheld is ImagesWithheld.NONE
+    assert save(store, burst()).images_withheld is ImagesWithheld.NONE
 
 
 def test_index_failure_removes_the_written_file(
@@ -669,7 +709,7 @@ def test_index_failure_removes_the_written_file(
         return size
 
     monkeypatch.setattr(EncryptedImageFiles, "write", write_then_break_index)
-    r = store.save_burst(burst())
+    r = save(store, burst())
     assert r.images_withheld is ImagesWithheld.DISK_FULL
     assert _files(root) == []
 
@@ -681,14 +721,14 @@ def test_index_failure_while_making_room(
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(store, "_make_room", broken)
-    assert store.save_burst(burst()).images_withheld is ImagesWithheld.DISK_FULL
+    assert save(store, burst()).images_withheld is ImagesWithheld.DISK_FULL
 
 
 def test_recovery_after_crash(
     root: Path, clock: FakeClock, caplog: pytest.LogCaptureFixture
 ) -> None:
     with _open(root, clock) as s:
-        kept, lost = s.save_burst(burst(sizes=(1000, 1000))).image_ids
+        kept, lost = save(s, burst(sizes=(1000, 1000))).image_ids
     files = EncryptedImageFiles(root / "images", InMemoryKeyProvider(KEY))
     # A write interrupted before the rename, one after the rename but before
     # the index insert, and a file lost under a committed row.
@@ -726,10 +766,10 @@ def test_close_twice(root: Path, clock: FakeClock) -> None:
 
 
 def test_age_purge(store: EvidenceStore, clock: FakeClock, root: Path) -> None:
-    old = store.save_burst(burst(sizes=(1000, 1000)))
+    old = save(store, burst(sizes=(1000, 1000)))
     store.mark_uploaded(old.image_ids[0])
     clock.advance(20 * 86400)
-    young = store.save_burst(burst())
+    young = save(store, burst())
     clock.advance(10 * 86400 + 1)
     summary = store.purge_expired()
     assert (summary.expired, summary.expired_unsent) == (2, 1)
@@ -747,7 +787,7 @@ def test_age_purge(store: EvidenceStore, clock: FakeClock, root: Path) -> None:
 
 
 def test_withheld_records_expire(store: EvidenceStore, clock: FakeClock) -> None:
-    store.save_burst(burst(sizes=(MIB + 1,)))
+    save(store, burst(sizes=(MIB + 1,)))
     assert len(store.withheld_events()) == 1
     clock.advance(31 * 86400)
     store.purge_expired()

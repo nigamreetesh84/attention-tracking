@@ -25,7 +25,12 @@ within `alert_min_interval` of the last alert does not alert again.
 The store has no handle on the event queue: the alert sink can only enqueue.
 Scan and event metadata are therefore never dropped to make space.
 
-Consent is not checked here; the capture gate (PLAN 2.5) sits in front.
+Consent is decided by the capture gate (PLAN 2.5), not here, but the store
+enforces that the gate was asked: `save_burst` demands a `CapturePermit`
+that only `CaptureGate` mints, and re-checks it before every frame and once
+after the last one. If the gate closes mid-burst (logout, consent change,
+break) the frames already written for this burst are deleted and the result
+carries the gate's `images_withheld` reason.
 """
 
 import hashlib
@@ -48,6 +53,8 @@ from ag_shared.ids import Uuid7Generator
 from pydantic import JsonValue
 
 from ag_workstation.clock import Clock
+from ag_workstation.consent.decision import GateDecision
+from ag_workstation.consent.permit import CapturePermit, PermitError
 from ag_workstation.engine_api import EvidenceBurst, EvidenceFrame, FrameRole
 from ag_workstation.evidence.alerts import DiskFullAlertSink
 from ag_workstation.evidence.files import (
@@ -120,6 +127,8 @@ class RemovalReason(StrEnum):
     """Older than `retention_local.max_age_days`."""
     CORRUPT = "corrupt"
     """Missing file, failed authentication or hash mismatch."""
+    GATE_CLOSED = "gate_closed"
+    """The capture gate closed while its burst was being written."""
 
 
 class EvidenceUnavailableError(LookupError):
@@ -495,20 +504,35 @@ class EvidenceStore:
 
     # -- saving ---------------------------------------------------------------
 
-    def save_burst(self, burst: EvidenceBurst, event_id: UUID | None = None) -> SaveResult:
+    def save_burst(
+        self, burst: EvidenceBurst, event_id: UUID | None = None, *, permit: CapturePermit
+    ) -> SaveResult:
         """Seal and store a burst's frames under `event_id` (default: the burst's).
 
-        Never raises for disk problems: frames that cannot be stored are left
-        out and the result says `images_withheld = disk_full`. Key frames are
-        stored first, so a nearly full store keeps the most useful frames.
+        `permit` comes from the capture gate for this very burst; without a
+        valid, unused one this raises `PermitError` and writes nothing. The
+        gate is asked again before every frame and after the last: once it
+        is closed, this burst's frames are deleted and the result carries the
+        gate's reason. Never raises for disk problems: frames that cannot be
+        stored are left out and the result says `images_withheld = disk_full`.
+        Key frames are stored first, so a nearly full store keeps the most
+        useful frames.
         """
+        if not isinstance(permit, CapturePermit):
+            raise PermitError("save_burst needs a capture permit from the capture gate")
+        permit.redeem(burst)
         target = event_id or burst.event_id
         saved: dict[int, UUID] = {}
         refused = 0
         purged: list[tuple[UUID, UUID]] = []
+        closed: GateDecision | None = None
         with self._lock:
             order = sorted(range(len(burst.frames)), key=lambda i: _frame_priority(burst.frames[i]))
             for index in order:
+                decision = permit.recheck()
+                if not decision.open:
+                    closed = decision
+                    break
                 frame = burst.frames[index]
                 image_id, room = self._save_frame(target, frame)
                 purged.extend(room.purged)
@@ -516,6 +540,13 @@ class EvidenceStore:
                     refused += 1
                 else:
                     saved[index] = image_id
+            if closed is None:
+                final = permit.recheck()
+                closed = None if final.open else final
+            if closed is not None:
+                self._withdraw(target, list(saved.values()), closed)
+                saved.clear()
+                refused = 0
             try:
                 if refused:
                     self._record_withheld([(target, refused)])
@@ -523,12 +554,40 @@ class EvidenceStore:
             except sqlite3.Error:
                 # The frames are saved or not; only bookkeeping failed. Fail open.
                 logger.exception("evidence index error after saving a burst")
+        if closed is not None:
+            return SaveResult(
+                event_id=target,
+                image_ids=(),
+                images_withheld=closed.images_withheld,
+                refused=len(burst.frames),
+            )
         return SaveResult(
             event_id=target,
             image_ids=tuple(saved[i] for i in sorted(saved)),
             images_withheld=ImagesWithheld.DISK_FULL if refused else ImagesWithheld.NONE,
             refused=refused,
         )
+
+    def _withdraw(self, event_id: UUID, image_ids: list[UUID], decision: GateDecision) -> None:
+        """Delete frames of a burst whose gate closed while it was written."""
+        logger.info(
+            "capture gate closed mid-burst (%s): %d frames of event %s deleted",
+            decision.reason.value,
+            len(image_ids),
+            event_id,
+        )
+        if not image_ids:
+            return
+        try:
+            self._remove(image_ids, RemovalReason.GATE_CLOSED)
+        except (sqlite3.Error, OSError):
+            logger.exception("evidence index error while withdrawing frames; deleting files")
+            # A row without its file is marked corrupt by recovery; never keep the image.
+            for image_id in image_ids:
+                try:
+                    self._files.delete(image_id)
+                except OSError:
+                    logger.exception("could not delete withdrawn evidence file %s", image_id)
 
     def _save_frame(self, event_id: UUID, frame: EvidenceFrame) -> tuple[UUID | None, _Room]:
         image_id = self._ids()

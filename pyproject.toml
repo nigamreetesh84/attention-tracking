@@ -36,6 +36,7 @@ workstation = [
     "mediapipe",
     "numpy",
     "pywin32; sys_platform == 'win32'",
+    "tzdata; sys_platform == 'win32'",
 ]
 dev = [
     "pytest",
@@ -44,6 +45,7 @@ dev = [
     "ruff",
     "mypy",
     "pip-audit",
+    "hypothesis",
 ]
 
 [tool.setuptools]
