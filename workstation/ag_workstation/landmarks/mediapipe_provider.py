@@ -9,6 +9,7 @@ The models are `.task` files that are not part of the repository; see
 the `AG_MODEL_DIR` environment variable (or an explicit `ModelPaths`).
 """
 
+import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,10 +180,9 @@ class MediaPipeLandmarkProvider:
         self._closed = True
         for landmarker in (self._face, self._pose):
             if landmarker is not None:
-                try:
+                # Closing is best effort: a failing close must not mask shutdown.
+                with contextlib.suppress(Exception):
                     landmarker.close()
-                except Exception:  # noqa: S110 - closing is best effort
-                    pass
         self._face = None
         self._pose = None
 

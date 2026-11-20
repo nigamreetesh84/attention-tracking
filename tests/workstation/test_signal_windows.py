@@ -1,5 +1,7 @@
 """Windowed signal state: EAR baseline, PERCLOS, blink rate, yawn, nod, motion."""
 
+from collections.abc import Sequence
+
 import pytest
 from ag_workstation.landmarks import Point
 from ag_workstation.signals.params import ExtractionParams
@@ -356,7 +358,9 @@ def _nod() -> NodDetector:
     return NodDetector(drop_deg=15.0, recover_deg=5.0, max_s=3.0, ref_window_s=4.0)
 
 
-def _feed(detector: NodDetector, pitches: list[float | None], start: int = 0) -> list[bool | None]:
+def _feed(
+    detector: NodDetector, pitches: Sequence[float | None], start: int = 0
+) -> list[bool | None]:
     return [detector.update(_t(start + i), pitch, GAP) for i, pitch in enumerate(pitches)]
 
 

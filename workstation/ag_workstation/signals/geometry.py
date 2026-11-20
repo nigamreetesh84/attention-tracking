@@ -9,6 +9,7 @@ import math
 from collections.abc import Sequence
 
 from ag_shared.config import RoiPoint
+
 from ag_workstation.landmarks.types import EyePoints, MouthPoints, Point, PoseObservation
 
 _EPS = 1e-9

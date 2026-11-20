@@ -20,6 +20,7 @@ from ag_shared.config import CameraConfig
 from ag_shared.ppe import PpeProfile
 from ag_shared.signals import SignalFrame, SignalName, SignalReading
 from ag_shared.thresholds import Thresholds
+
 from ag_workstation.landmarks.types import (
     FaceObservation,
     LandmarkResult,

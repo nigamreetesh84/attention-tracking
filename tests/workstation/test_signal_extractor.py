@@ -26,6 +26,7 @@ from ag_workstation.landmarks import (
     synthetic_pose,
     synthetic_result,
 )
+from ag_workstation.landmarks.fake import GOOD_STATS
 from ag_workstation.signals import ExtractionParams, SignalExtractor
 
 S = SignalName
@@ -52,9 +53,9 @@ def _res(
     ts: float,
     *faces: FaceObservation,
     poses: tuple[PoseObservation, ...] | None = None,
-    **kwargs: RegionStats | None,
+    frame_stats: RegionStats | None = GOOD_STATS,
 ) -> LandmarkResult:
-    return synthetic_result(ts, faces, poses=poses, **kwargs)
+    return synthetic_result(ts, faces, poses=poses, frame_stats=frame_stats)
 
 
 def _val(frame: SignalFrame, name: SignalName) -> float:

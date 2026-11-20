@@ -11,6 +11,7 @@ from collections import deque
 from collections.abc import Mapping
 
 from ag_shared.signals import SignalReading
+
 from ag_workstation.landmarks.types import Point
 from ag_workstation.signals.geometry import clamp
 from ag_workstation.signals.params import ExtractionParams

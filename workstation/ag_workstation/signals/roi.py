@@ -8,6 +8,7 @@ means the whole frame.
 from collections.abc import Sequence
 
 from ag_shared.config import RoiPoint
+
 from ag_workstation.landmarks.types import FaceObservation, Point, PoseObservation
 from ag_workstation.signals.geometry import point_in_polygon
 
