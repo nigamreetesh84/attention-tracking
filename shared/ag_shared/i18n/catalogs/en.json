@@ -1,0 +1,13 @@
+{
+  "login.failed": "Employee ID or PIN is not correct.",
+  "login.invalid_input": "Enter your employee ID (letters and digits, up to 16) and your 4-6 digit PIN.",
+  "login.locked": "Too many attempts. Try again in {minutes} min.",
+  "login.ok": "Welcome, {name}.",
+  "login.unavailable": "Login is not available right now. Ask your supervisor.",
+  "scan.login_required": "Scan recorded. Please log in with your employee ID.",
+  "scan.ok": "Scan recorded.",
+  "scan.on_break": "Scan recorded during a break.",
+  "scan.unmonitored": "Scan recorded. Monitoring is not available right now.",
+  "scan.warned": "Scan recorded. Please stay focused on your work.",
+  "scan.warned_repeated": "Scan recorded. Several alerts in a short time: your supervisor will check in."
+}

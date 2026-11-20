@@ -48,16 +48,13 @@ dev = [
     "hypothesis",
 ]
 
-[tool.setuptools]
-packages = ["ag_shared", "ag_workstation", "ag_server"]
-
-[tool.setuptools.package-dir]
-ag_shared = "shared/ag_shared"
-ag_workstation = "workstation/ag_workstation"
-ag_server = "server/ag_server"
+[tool.setuptools.packages.find]
+where = ["shared", "workstation", "server"]
+include = ["ag_shared*", "ag_workstation*", "ag_server*"]
 
 [tool.setuptools.package-data]
 "*" = ["py.typed"]
+"ag_shared.i18n" = ["catalogs/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
