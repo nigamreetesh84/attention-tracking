@@ -9,6 +9,16 @@ taken from the frames, so it runs deterministically in CI and in replays.
 from ag_workstation.engine.calendar import CalendarStatus, ShiftCalendar
 from ag_workstation.engine.estimator import CameraEstimator, EstimatorParams
 from ag_workstation.engine.fusion import DegradedTracker, fuse
+from ag_workstation.engine.pipeline import PipelineOutput, StationPipeline
+from ag_workstation.engine.runtime import (
+    BucketClosed,
+    Engine,
+    EngineEvent,
+    EngineHealth,
+    EpisodeClosed,
+    EpisodeOpened,
+    FrameFeed,
+)
 from ag_workstation.engine.state_machine import (
     Bucket,
     Episode,
@@ -22,19 +32,28 @@ from ag_workstation.engine.types import CameraCandidate, FusedState
 
 __all__ = [
     "Bucket",
+    "BucketClosed",
     "CalendarStatus",
     "CameraCandidate",
     "CameraEstimator",
     "ConditionTimer",
     "DegradedTracker",
     "EdgeCounter",
+    "Engine",
+    "EngineEvent",
+    "EngineHealth",
     "Episode",
+    "EpisodeClosed",
+    "EpisodeOpened",
     "EstimatorParams",
+    "FrameFeed",
     "FusedState",
     "MachineOutput",
+    "PipelineOutput",
     "ScanDecision",
     "ShareWindow",
     "ShiftCalendar",
+    "StationPipeline",
     "StationStateMachine",
     "StationStatus",
     "fuse",
