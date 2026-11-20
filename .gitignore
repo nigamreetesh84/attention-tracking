@@ -30,3 +30,5 @@ deploy/secrets/
 .claude/settings.local.json
 .idea/
 .vscode/
+
+/models/
