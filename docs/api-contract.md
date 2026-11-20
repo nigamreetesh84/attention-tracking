@@ -107,6 +107,8 @@ The live wall treats a workstation as offline after 15 s without a heartbeat.
   cameras: [{slot, role, kind, uri, roi, calibration, is_enabled}],
   ppe_profile: {...}, thresholds: {... fully resolved ...},
   shift_thresholds: [{shift_id, thresholds}],
+  profile_thresholds: [{ppe_profile_id, ppe_profile: {...}, thresholds,
+                        shift_thresholds: [{shift_id, thresholds}]}],
   shifts: [{id, name, start_time, end_time, days_of_week, breaks: [...]}],
   roster: [{user_id, employee_id, display_name, pin_hash, has_consent,
             ppe_profile_override, preferred_language, is_active}],
@@ -119,6 +121,13 @@ The live wall treats a workstation as offline after 15 s without a heartbeat.
 - The client validates the bundle, applies it atomically and reports
   `applied_config_version`. An invalid bundle is rejected and the previous
   one stays active (fail-open); the rejection is reported in the heartbeat.
+- `profile_thresholds` (added 2026-11-20, owner-approved; optional, default
+  empty) lists every PPE profile a roster `ppe_profile_override` (a
+  `ppe_profile` id) refers to, with thresholds fully resolved with that
+  profile as the PPE layer, so an override applies offline. Lookup for a
+  worker and shift: the override's entry (its shift entry, else its
+  `thresholds`); if there is no override or no entry for it, the station
+  `ppe_profile` with its shift entry, else `thresholds`.
 - The roster holds only active workers of the workstation's site. `pin_hash`
   is argon2id. The bundle is stored encrypted on the device.
 - Camera URIs may contain credentials, so the bundle is sensitive in transit

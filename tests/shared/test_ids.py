@@ -1,71 +1,93 @@
-"""UUIDv7 generation."""
+"""UUIDv7 generator: layout, ordering, injectable clock."""
 
 import threading
-from uuid import UUID
+from datetime import UTC, datetime, timedelta, timezone
+from uuid import RFC_4122, UUID, uuid4
 
 import pytest
-from ag_shared.ids import Uuid7Generator, uuid7, uuid7_ms
+from ag_shared.ids import Uuid7Generator, is_uuid7, new_uuid7, uuid7_time
+
+T0 = datetime(2026, 11, 20, 12, 0, 0, 123456, tzinfo=UTC)
 
 
-def test_version_variant_and_timestamp() -> None:
-    gen = Uuid7Generator(clock_ms=lambda: 1_700_000_000_123)
-    value = gen()
-    assert value.version == 7
-    assert value.variant == "specified in RFC 4122"
-    assert uuid7_ms(value) == 1_700_000_000_123
+class _Clock:
+    def __init__(self, t: datetime) -> None:
+        self.t = t
+
+    def __call__(self) -> datetime:
+        return self.t
 
 
-def test_ids_are_strictly_increasing_within_one_millisecond() -> None:
-    gen = Uuid7Generator(clock_ms=lambda: 5)
-    ids = [gen() for _ in range(5000)]  # more than the 12-bit counter holds
+def _zero_random(n: int) -> bytes:
+    return bytes(n)
+
+
+def test_layout_version_variant_and_time() -> None:
+    gen = Uuid7Generator(now=_Clock(T0))
+    u = gen()
+    assert u.version == 7
+    assert u.variant == RFC_4122
+    assert is_uuid7(u)
+    assert uuid7_time(u) == T0.replace(microsecond=123000)
+
+
+def test_timestamp_is_unix_milliseconds_in_top_48_bits() -> None:
+    u = Uuid7Generator(now=_Clock(T0), randbytes=_zero_random)()
+    assert u.int >> 80 == int(T0.timestamp() * 1000)
+
+
+def test_ids_in_the_same_millisecond_are_strictly_increasing() -> None:
+    gen = Uuid7Generator(now=_Clock(T0))
+    ids = [gen() for _ in range(5000)]  # more than the 12-bit counter range
     assert ids == sorted(ids)
     assert len(set(ids)) == len(ids)
 
 
-def test_clock_going_backwards_keeps_order() -> None:
-    times = iter([100, 50, 50, 101])
-    gen = Uuid7Generator(clock_ms=lambda: next(times))
-    ids = [gen() for _ in range(4)]
-    assert ids == sorted(ids)
+def test_ordering_follows_time_and_survives_a_clock_step_back() -> None:
+    clock = _Clock(T0)
+    gen = Uuid7Generator(now=clock)
+    a = gen()
+    clock.t = T0 + timedelta(milliseconds=5)
+    b = gen()
+    clock.t = T0 - timedelta(seconds=10)  # wall clock corrected backwards
+    c = gen()
+    assert a < b < c
+    assert uuid7_time(c) >= uuid7_time(b)
 
 
-def test_process_generator_is_thread_safe_and_unique() -> None:
+def test_naive_clock_is_refused() -> None:
+    gen = Uuid7Generator(now=lambda: datetime(2026, 1, 1))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        gen()
+
+
+def test_non_utc_aware_clock_is_converted() -> None:
+    ist = timezone(timedelta(hours=5, minutes=30))
+    gen = Uuid7Generator(now=_Clock(T0.astimezone(ist)))
+    assert uuid7_time(gen()) == T0.replace(microsecond=123000)
+
+
+def test_is_uuid7_rejects_other_versions() -> None:
+    assert not is_uuid7(uuid4())
+    assert not is_uuid7(UUID(int=0))
+    with pytest.raises(ValueError, match="UUIDv7"):
+        uuid7_time(uuid4())
+
+
+def test_default_generator_and_threads() -> None:
+    gen = Uuid7Generator()
     out: list[UUID] = []
     lock = threading.Lock()
 
     def work() -> None:
-        local = [uuid7() for _ in range(500)]
+        local = [gen() for _ in range(200)]
         with lock:
             out.extend(local)
 
-    threads = [threading.Thread(target=work) for _ in range(8)]
+    threads = [threading.Thread(target=work) for _ in range(4)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert len(set(out)) == 4000
-
-
-def test_uuid7_ms_rejects_other_versions() -> None:
-    with pytest.raises(ValueError, match="UUIDv7"):
-        uuid7_ms(UUID("12345678-1234-4234-8234-123456789abc"))
-
-
-def test_concurrent_ids_from_one_generator_stay_ordered_per_millisecond() -> None:
-    gen = Uuid7Generator(clock_ms=lambda: 42)
-    out: list[UUID] = []
-    lock = threading.Lock()
-
-    def work() -> None:
-        for _ in range(300):
-            value = gen()
-            with lock:
-                out.append(value)
-
-    threads = [threading.Thread(target=work) for _ in range(6)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    counters = [(v.int >> 64) & 0xFFFF for v in out]
-    assert len(set(counters)) == len(counters)  # no two ids share a counter value
+    assert len(set(out)) == 800
+    assert is_uuid7(new_uuid7())

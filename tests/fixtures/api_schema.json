@@ -1,0 +1,3118 @@
+{
+ "schema_revision": 1,
+ "schemas": {
+  "BatchResult": {
+   "$defs": {
+    "ItemResult": {
+     "description": "The result for one item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "reason": {
+       "anyOf": [
+        {
+         "maxLength": 500,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Reason"
+      },
+      "status": {
+       "$ref": "#/$defs/ItemStatus"
+      }
+     },
+     "required": [
+      "id",
+      "status"
+     ],
+     "title": "ItemResult",
+     "type": "object"
+    },
+    "ItemStatus": {
+     "description": "Per-item ingest result.",
+     "enum": [
+      "accepted",
+      "duplicate",
+      "rejected",
+      "retry_later"
+     ],
+     "title": "ItemStatus",
+     "type": "string"
+    }
+   },
+   "description": "`200` response of `POST /events:batch`.",
+   "properties": {
+    "batch_id": {
+     "format": "uuid",
+     "title": "Batch Id",
+     "type": "string"
+    },
+    "results": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/ItemResult"
+     },
+     "title": "Results",
+     "type": "array"
+    },
+    "server_time": {
+     "format": "date-time",
+     "title": "Server Time",
+     "type": "string"
+    }
+   },
+   "required": [
+    "batch_id",
+    "server_time"
+   ],
+   "title": "BatchResult",
+   "type": "object"
+  },
+  "ConfigBundle": {
+   "$defs": {
+    "AttentionState": {
+     "description": "State of one camera candidate or of the whole station.",
+     "enum": [
+      "attentive",
+      "distracted",
+      "drowsy",
+      "sleeping",
+      "absent",
+      "unknown",
+      "on_break"
+     ],
+     "title": "AttentionState",
+     "type": "string"
+    },
+    "Calibration": {
+     "additionalProperties": false,
+     "description": "Per-camera calibration stored by the calibration wizard.\n\nHead pose signals are reported relative to this neutral pose.",
+     "properties": {
+      "exposure_notes": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Exposure Notes"
+      },
+      "neutral_pitch_deg": {
+       "default": 0.0,
+       "maximum": 90,
+       "minimum": -90,
+       "title": "Neutral Pitch Deg",
+       "type": "number"
+      },
+      "neutral_roll_deg": {
+       "default": 0.0,
+       "maximum": 90,
+       "minimum": -90,
+       "title": "Neutral Roll Deg",
+       "type": "number"
+      },
+      "neutral_yaw_deg": {
+       "default": 0.0,
+       "maximum": 90,
+       "minimum": -90,
+       "title": "Neutral Yaw Deg",
+       "type": "number"
+      }
+     },
+     "title": "Calibration",
+     "type": "object"
+    },
+    "CameraConfig": {
+     "additionalProperties": false,
+     "description": "One camera of a station.",
+     "properties": {
+      "calibration": {
+       "$ref": "#/$defs/Calibration",
+       "default": {
+        "exposure_notes": null,
+        "neutral_pitch_deg": 0.0,
+        "neutral_roll_deg": 0.0,
+        "neutral_yaw_deg": 0.0
+       }
+      },
+      "is_enabled": {
+       "default": true,
+       "title": "Is Enabled",
+       "type": "boolean"
+      },
+      "kind": {
+       "$ref": "#/$defs/CameraKind"
+      },
+      "roi": {
+       "anyOf": [
+        {
+         "items": {
+          "$ref": "#/$defs/RoiPoint"
+         },
+         "minItems": 3,
+         "type": "array"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Roi"
+      },
+      "role": {
+       "$ref": "#/$defs/CameraRole"
+      },
+      "slot": {
+       "maximum": 4,
+       "minimum": 1,
+       "title": "Slot",
+       "type": "integer"
+      },
+      "uri": {
+       "minLength": 1,
+       "title": "Uri",
+       "type": "string"
+      }
+     },
+     "required": [
+      "slot",
+      "role",
+      "kind",
+      "uri"
+     ],
+     "title": "CameraConfig",
+     "type": "object"
+    },
+    "CameraKind": {
+     "description": "How the camera is reached.",
+     "enum": [
+      "usb",
+      "rtsp",
+      "onvif",
+      "builtin"
+     ],
+     "title": "CameraKind",
+     "type": "string"
+    },
+    "CameraRole": {
+     "description": "Fusion role. Exactly one camera per station is primary.",
+     "enum": [
+      "primary",
+      "secondary"
+     ],
+     "title": "CameraRole",
+     "type": "string"
+    },
+    "CaptureConfig": {
+     "additionalProperties": false,
+     "description": "Evidence capture: burst shape, JPEG quality and the in-memory ring.\n\nThe ring only ever lives in memory; nothing here enables recording.",
+     "properties": {
+      "episode_keyframe_states": {
+       "default": [
+        "sleeping",
+        "absent"
+       ],
+       "items": {
+        "$ref": "#/$defs/AttentionState"
+       },
+       "title": "Episode Keyframe States",
+       "type": "array"
+      },
+      "frame_interval_ms": {
+       "default": 500,
+       "maximum": 5000,
+       "minimum": 100,
+       "title": "Frame Interval Ms",
+       "type": "integer"
+      },
+      "jpeg_quality": {
+       "default": 80,
+       "maximum": 100,
+       "minimum": 1,
+       "title": "Jpeg Quality",
+       "type": "integer"
+      },
+      "post_frames": {
+       "default": 2,
+       "maximum": 10,
+       "minimum": 0,
+       "title": "Post Frames",
+       "type": "integer"
+      },
+      "pre_frames": {
+       "default": 2,
+       "maximum": 10,
+       "minimum": 0,
+       "title": "Pre Frames",
+       "type": "integer"
+      },
+      "ring_seconds": {
+       "default": 3.0,
+       "exclusiveMinimum": 0,
+       "maximum": 60,
+       "title": "Ring Seconds",
+       "type": "number"
+      }
+     },
+     "title": "CaptureConfig",
+     "type": "object"
+    },
+    "ConsentPolicyInfo": {
+     "description": "The site's current consent policy text.",
+     "properties": {
+      "body": {
+       "minLength": 1,
+       "title": "Body",
+       "type": "string"
+      },
+      "language": {
+       "maxLength": 16,
+       "minLength": 2,
+       "title": "Language",
+       "type": "string"
+      },
+      "version": {
+       "minimum": 1,
+       "title": "Version",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "version",
+      "language",
+      "body"
+     ],
+     "title": "ConsentPolicyInfo",
+     "type": "object"
+    },
+    "DeploymentMode": {
+     "description": "Where the server runs.",
+     "enum": [
+      "on_premise",
+      "private_cloud",
+      "hybrid"
+     ],
+     "title": "DeploymentMode",
+     "type": "string"
+    },
+    "PpeProfile": {
+     "additionalProperties": false,
+     "description": "A PPE profile as the engine consumes it.\n\n`signals` always holds an entry for every `SignalName` after validation\n(missing ones are filled in as disabled). `thresholds` is the profile's\nlayer in threshold resolution, if it has one.",
+     "properties": {
+      "glare_tolerance": {
+       "default": false,
+       "title": "Glare Tolerance",
+       "type": "boolean"
+      },
+      "kind": {
+       "$ref": "#/$defs/PpeProfileKind"
+      },
+      "signals": {
+       "additionalProperties": {
+        "$ref": "#/$defs/SignalSetting"
+       },
+       "propertyNames": {
+        "$ref": "#/$defs/SignalName"
+       },
+       "title": "Signals",
+       "type": "object"
+      },
+      "thresholds": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/ThresholdOverrides"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      }
+     },
+     "required": [
+      "kind",
+      "signals"
+     ],
+     "title": "PpeProfile",
+     "type": "object"
+    },
+    "PpeProfileKind": {
+     "description": "Profile kinds; values match `ppe_profile.kind` in the schema.",
+     "enum": [
+      "open_face",
+      "clear_glasses",
+      "sunglasses",
+      "mask",
+      "helmet_shield",
+      "custom"
+     ],
+     "title": "PpeProfileKind",
+     "type": "string"
+    },
+    "ProfileThresholds": {
+     "description": "A PPE profile and its fully resolved thresholds for this workstation.\n\nResolved on the server like the station-level `thresholds`, with this\nprofile as the PPE layer: defaults -> site -> this profile -> shift ->\nworkstation.",
+     "properties": {
+      "ppe_profile": {
+       "$ref": "#/$defs/PpeProfile"
+      },
+      "ppe_profile_id": {
+       "format": "uuid",
+       "title": "Ppe Profile Id",
+       "type": "string"
+      },
+      "shift_thresholds": {
+       "default": [],
+       "items": {
+        "$ref": "#/$defs/ShiftThresholds"
+       },
+       "title": "Shift Thresholds",
+       "type": "array"
+      },
+      "thresholds": {
+       "$ref": "#/$defs/Thresholds"
+      }
+     },
+     "required": [
+      "ppe_profile_id",
+      "ppe_profile",
+      "thresholds"
+     ],
+     "title": "ProfileThresholds",
+     "type": "object"
+    },
+    "RetentionLocal": {
+     "description": "Local evidence limits (contract section 6, \"Limits\").",
+     "properties": {
+      "max_age_days": {
+       "default": 30,
+       "maximum": 365,
+       "minimum": 1,
+       "title": "Max Age Days",
+       "type": "integer"
+      },
+      "max_disk_mb": {
+       "default": 5120,
+       "minimum": 1,
+       "title": "Max Disk Mb",
+       "type": "integer"
+      }
+     },
+     "title": "RetentionLocal",
+     "type": "object"
+    },
+    "RoiPoint": {
+     "additionalProperties": false,
+     "description": "One polygon vertex in normalized image coordinates (0-1, origin top-left).",
+     "properties": {
+      "x": {
+       "maximum": 1,
+       "minimum": 0,
+       "title": "X",
+       "type": "number"
+      },
+      "y": {
+       "maximum": 1,
+       "minimum": 0,
+       "title": "Y",
+       "type": "number"
+      }
+     },
+     "required": [
+      "x",
+      "y"
+     ],
+     "title": "RoiPoint",
+     "type": "object"
+    },
+    "RosterEntry": {
+     "description": "One active worker of the site, for offline login.",
+     "properties": {
+      "display_name": {
+       "maxLength": 100,
+       "minLength": 1,
+       "title": "Display Name",
+       "type": "string"
+      },
+      "employee_id": {
+       "pattern": "^[A-Za-z0-9]{1,16}$",
+       "title": "Employee Id",
+       "type": "string"
+      },
+      "has_consent": {
+       "default": false,
+       "title": "Has Consent",
+       "type": "boolean"
+      },
+      "is_active": {
+       "default": true,
+       "title": "Is Active",
+       "type": "boolean"
+      },
+      "pin_hash": {
+       "anyOf": [
+        {
+         "pattern": "^\\$argon2id\\$",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Pin Hash"
+      },
+      "ppe_profile_override": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ppe Profile Override"
+      },
+      "preferred_language": {
+       "anyOf": [
+        {
+         "maxLength": 16,
+         "minLength": 2,
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Preferred Language"
+      },
+      "user_id": {
+       "format": "uuid",
+       "title": "User Id",
+       "type": "string"
+      }
+     },
+     "required": [
+      "user_id",
+      "employee_id",
+      "display_name"
+     ],
+     "title": "RosterEntry",
+     "type": "object"
+    },
+    "Shift": {
+     "additionalProperties": false,
+     "description": "A shift with its breaks.\n\nTimes are site-local and may cross midnight (`end_time` before\n`start_time`). `days_of_week` uses 0 = Monday ... 6 = Sunday and names\nthe day the shift starts on.",
+     "properties": {
+      "breaks": {
+       "default": [],
+       "items": {
+        "$ref": "#/$defs/ShiftBreak"
+       },
+       "title": "Breaks",
+       "type": "array"
+      },
+      "days_of_week": {
+       "items": {
+        "maximum": 6,
+        "minimum": 0,
+        "type": "integer"
+       },
+       "minItems": 1,
+       "title": "Days Of Week",
+       "type": "array"
+      },
+      "end_time": {
+       "format": "time",
+       "title": "End Time",
+       "type": "string"
+      },
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "name": {
+       "minLength": 1,
+       "title": "Name",
+       "type": "string"
+      },
+      "start_time": {
+       "format": "time",
+       "title": "Start Time",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "name",
+      "start_time",
+      "end_time",
+      "days_of_week"
+     ],
+     "title": "Shift",
+     "type": "object"
+    },
+    "ShiftBreak": {
+     "additionalProperties": false,
+     "description": "A scheduled break inside a shift (site-local times).",
+     "properties": {
+      "end_time": {
+       "format": "time",
+       "title": "End Time",
+       "type": "string"
+      },
+      "name": {
+       "minLength": 1,
+       "title": "Name",
+       "type": "string"
+      },
+      "start_time": {
+       "format": "time",
+       "title": "Start Time",
+       "type": "string"
+      }
+     },
+     "required": [
+      "name",
+      "start_time",
+      "end_time"
+     ],
+     "title": "ShiftBreak",
+     "type": "object"
+    },
+    "ShiftThresholds": {
+     "additionalProperties": false,
+     "description": "Fully resolved thresholds that apply while one shift is active.",
+     "properties": {
+      "shift_id": {
+       "format": "uuid",
+       "title": "Shift Id",
+       "type": "string"
+      },
+      "thresholds": {
+       "$ref": "#/$defs/Thresholds"
+      }
+     },
+     "required": [
+      "shift_id",
+      "thresholds"
+     ],
+     "title": "ShiftThresholds",
+     "type": "object"
+    },
+    "SignalName": {
+     "description": "Every signal the engine can extract per camera per frame.",
+     "enum": [
+      "face_present",
+      "quality",
+      "ear",
+      "eyes_closed",
+      "perclos",
+      "blink_rate",
+      "mar",
+      "yawn",
+      "head_yaw",
+      "head_pitch",
+      "head_roll",
+      "head_nod",
+      "head_dropped",
+      "posture",
+      "motion"
+     ],
+     "title": "SignalName",
+     "type": "string"
+    },
+    "SignalSetting": {
+     "additionalProperties": false,
+     "description": "Whether one signal is computed and how much it counts.",
+     "properties": {
+      "enabled": {
+       "default": true,
+       "title": "Enabled",
+       "type": "boolean"
+      },
+      "weight": {
+       "default": 1.0,
+       "maximum": 1,
+       "minimum": 0,
+       "title": "Weight",
+       "type": "number"
+      }
+     },
+     "title": "SignalSetting",
+     "type": "object"
+    },
+    "SiteInfo": {
+     "description": "The site's timezone and settings.",
+     "properties": {
+      "settings": {
+       "$ref": "#/$defs/SiteSettings",
+       "default": {
+        "blocking_mode": false,
+        "default_language": "en",
+        "deployment_mode": "on_premise",
+        "escalation_count": 3,
+        "escalation_window_min": 15,
+        "fail_open": true,
+        "live_video_enabled": false,
+        "pin_required": true,
+        "retention_audit_days": 365,
+        "retention_image_days": 30,
+        "retention_metadata_days": 365
+       }
+      },
+      "timezone": {
+       "maxLength": 64,
+       "minLength": 1,
+       "title": "Timezone",
+       "type": "string"
+      }
+     },
+     "required": [
+      "timezone"
+     ],
+     "title": "SiteInfo",
+     "type": "object"
+    },
+    "SiteSettings": {
+     "description": "Per-site settings with the schema defaults. Unknown keys are ignored.",
+     "properties": {
+      "blocking_mode": {
+       "default": false,
+       "title": "Blocking Mode",
+       "type": "boolean"
+      },
+      "default_language": {
+       "default": "en",
+       "maxLength": 16,
+       "minLength": 2,
+       "title": "Default Language",
+       "type": "string"
+      },
+      "deployment_mode": {
+       "$ref": "#/$defs/DeploymentMode",
+       "default": "on_premise"
+      },
+      "escalation_count": {
+       "default": 3,
+       "maximum": 100,
+       "minimum": 1,
+       "title": "Escalation Count",
+       "type": "integer"
+      },
+      "escalation_window_min": {
+       "default": 15,
+       "maximum": 1440,
+       "minimum": 1,
+       "title": "Escalation Window Min",
+       "type": "integer"
+      },
+      "fail_open": {
+       "default": true,
+       "title": "Fail Open",
+       "type": "boolean"
+      },
+      "live_video_enabled": {
+       "default": false,
+       "title": "Live Video Enabled",
+       "type": "boolean"
+      },
+      "pin_required": {
+       "default": true,
+       "title": "Pin Required",
+       "type": "boolean"
+      },
+      "retention_audit_days": {
+       "default": 365,
+       "maximum": 3650,
+       "minimum": 365,
+       "title": "Retention Audit Days",
+       "type": "integer"
+      },
+      "retention_image_days": {
+       "default": 30,
+       "maximum": 3650,
+       "minimum": 1,
+       "title": "Retention Image Days",
+       "type": "integer"
+      },
+      "retention_metadata_days": {
+       "default": 365,
+       "maximum": 3650,
+       "minimum": 1,
+       "title": "Retention Metadata Days",
+       "type": "integer"
+      }
+     },
+     "title": "SiteSettings",
+     "type": "object"
+    },
+    "ThresholdOverrides": {
+     "additionalProperties": false,
+     "description": "A partial `Thresholds`: only the keys one layer overrides.\n\nThis is the `values` of a `threshold_profile`. Each key is range-checked\nhere; cross-key rules are checked when the layers are resolved.",
+     "properties": {
+      "absent_seconds": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 3600,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Absent Seconds"
+      },
+      "distracted_pitch_deg": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 90,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Distracted Pitch Deg"
+      },
+      "distracted_seconds": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 3600,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Distracted Seconds"
+      },
+      "distracted_yaw_deg": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 90,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Distracted Yaw Deg"
+      },
+      "gap_tolerance_s": {
+       "anyOf": [
+        {
+         "maximum": 5,
+         "minimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Gap Tolerance S"
+      },
+      "perclos_threshold": {
+       "anyOf": [
+        {
+         "exclusiveMaximum": 1,
+         "exclusiveMinimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Perclos Threshold"
+      },
+      "perclos_window_s": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 3600,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Perclos Window S"
+      },
+      "quality_min": {
+       "anyOf": [
+        {
+         "maximum": 1,
+         "minimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Quality Min"
+      },
+      "recovery_seconds": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 3600,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Recovery Seconds"
+      },
+      "scan_window_s": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 60,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Scan Window S"
+      },
+      "sleeping_eyes_closed_s": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 3600,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Sleeping Eyes Closed S"
+      },
+      "sleeping_head_drop_s": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 3600,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Sleeping Head Drop S"
+      },
+      "unknown_seconds": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 3600,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Unknown Seconds"
+      },
+      "yawn_window_s": {
+       "anyOf": [
+        {
+         "exclusiveMinimum": 0,
+         "maximum": 3600,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Yawn Window S"
+      },
+      "yawns_for_drowsy": {
+       "anyOf": [
+        {
+         "maximum": 100,
+         "minimum": 1,
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Yawns For Drowsy"
+      }
+     },
+     "title": "ThresholdOverrides",
+     "type": "object"
+    },
+    "Thresholds": {
+     "additionalProperties": false,
+     "description": "A complete, validated set of detection thresholds.",
+     "properties": {
+      "absent_seconds": {
+       "default": 10.0,
+       "exclusiveMinimum": 0,
+       "maximum": 3600,
+       "title": "Absent Seconds",
+       "type": "number"
+      },
+      "distracted_pitch_deg": {
+       "default": 25.0,
+       "exclusiveMinimum": 0,
+       "maximum": 90,
+       "title": "Distracted Pitch Deg",
+       "type": "number"
+      },
+      "distracted_seconds": {
+       "default": 5.0,
+       "exclusiveMinimum": 0,
+       "maximum": 3600,
+       "title": "Distracted Seconds",
+       "type": "number"
+      },
+      "distracted_yaw_deg": {
+       "default": 30.0,
+       "exclusiveMinimum": 0,
+       "maximum": 90,
+       "title": "Distracted Yaw Deg",
+       "type": "number"
+      },
+      "gap_tolerance_s": {
+       "default": 0.5,
+       "maximum": 5,
+       "minimum": 0,
+       "title": "Gap Tolerance S",
+       "type": "number"
+      },
+      "perclos_threshold": {
+       "default": 0.3,
+       "exclusiveMaximum": 1,
+       "exclusiveMinimum": 0,
+       "title": "Perclos Threshold",
+       "type": "number"
+      },
+      "perclos_window_s": {
+       "default": 30.0,
+       "exclusiveMinimum": 0,
+       "maximum": 3600,
+       "title": "Perclos Window S",
+       "type": "number"
+      },
+      "quality_min": {
+       "default": 0.5,
+       "maximum": 1,
+       "minimum": 0,
+       "title": "Quality Min",
+       "type": "number"
+      },
+      "recovery_seconds": {
+       "default": 2.0,
+       "exclusiveMinimum": 0,
+       "maximum": 3600,
+       "title": "Recovery Seconds",
+       "type": "number"
+      },
+      "scan_window_s": {
+       "default": 5.0,
+       "exclusiveMinimum": 0,
+       "maximum": 60,
+       "title": "Scan Window S",
+       "type": "number"
+      },
+      "sleeping_eyes_closed_s": {
+       "default": 4.0,
+       "exclusiveMinimum": 0,
+       "maximum": 3600,
+       "title": "Sleeping Eyes Closed S",
+       "type": "number"
+      },
+      "sleeping_head_drop_s": {
+       "default": 8.0,
+       "exclusiveMinimum": 0,
+       "maximum": 3600,
+       "title": "Sleeping Head Drop S",
+       "type": "number"
+      },
+      "unknown_seconds": {
+       "default": 2.0,
+       "exclusiveMinimum": 0,
+       "maximum": 3600,
+       "title": "Unknown Seconds",
+       "type": "number"
+      },
+      "yawn_window_s": {
+       "default": 300.0,
+       "exclusiveMinimum": 0,
+       "maximum": 3600,
+       "title": "Yawn Window S",
+       "type": "number"
+      },
+      "yawns_for_drowsy": {
+       "default": 3,
+       "maximum": 100,
+       "minimum": 1,
+       "title": "Yawns For Drowsy",
+       "type": "integer"
+      }
+     },
+     "title": "Thresholds",
+     "type": "object"
+    },
+    "WorkstationInfo": {
+     "description": "The workstation this bundle is for.",
+     "properties": {
+      "camera_count": {
+       "maximum": 4,
+       "minimum": 1,
+       "title": "Camera Count",
+       "type": "integer"
+      },
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "line_id": {
+       "format": "uuid",
+       "title": "Line Id",
+       "type": "string"
+      },
+      "name": {
+       "maxLength": 100,
+       "minLength": 1,
+       "title": "Name",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "name",
+      "line_id",
+      "camera_count"
+     ],
+     "title": "WorkstationInfo",
+     "type": "object"
+    }
+   },
+   "description": "`GET /config` response body.",
+   "properties": {
+    "cameras": {
+     "items": {
+      "$ref": "#/$defs/CameraConfig"
+     },
+     "maxItems": 4,
+     "minItems": 1,
+     "title": "Cameras",
+     "type": "array"
+    },
+    "capture": {
+     "$ref": "#/$defs/CaptureConfig",
+     "default": {
+      "episode_keyframe_states": [
+       "sleeping",
+       "absent"
+      ],
+      "frame_interval_ms": 500,
+      "jpeg_quality": 80,
+      "post_frames": 2,
+      "pre_frames": 2,
+      "ring_seconds": 3.0
+     }
+    },
+    "consent_policy": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/ConsentPolicyInfo"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "generated_at": {
+     "format": "date-time",
+     "title": "Generated At",
+     "type": "string"
+    },
+    "ppe_profile": {
+     "$ref": "#/$defs/PpeProfile"
+    },
+    "profile_thresholds": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/ProfileThresholds"
+     },
+     "title": "Profile Thresholds",
+     "type": "array"
+    },
+    "retention_local": {
+     "$ref": "#/$defs/RetentionLocal",
+     "default": {
+      "max_age_days": 30,
+      "max_disk_mb": 5120
+     }
+    },
+    "roster": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/RosterEntry"
+     },
+     "title": "Roster",
+     "type": "array"
+    },
+    "shift_thresholds": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/ShiftThresholds"
+     },
+     "title": "Shift Thresholds",
+     "type": "array"
+    },
+    "shifts": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/Shift"
+     },
+     "title": "Shifts",
+     "type": "array"
+    },
+    "site": {
+     "$ref": "#/$defs/SiteInfo"
+    },
+    "target_app_version": {
+     "anyOf": [
+      {
+       "maxLength": 64,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Target App Version"
+    },
+    "thresholds": {
+     "$ref": "#/$defs/Thresholds"
+    },
+    "version": {
+     "minimum": 0,
+     "title": "Version",
+     "type": "integer"
+    },
+    "workstation": {
+     "$ref": "#/$defs/WorkstationInfo"
+    }
+   },
+   "required": [
+    "version",
+    "generated_at",
+    "site",
+    "workstation",
+    "cameras",
+    "ppe_profile",
+    "thresholds"
+   ],
+   "title": "ConfigBundle",
+   "type": "object"
+  },
+  "EnrollRequest": {
+   "description": "`POST /enroll`: exchange the one-time enrollment token for a device secret.",
+   "properties": {
+    "enrollment_token": {
+     "format": "password",
+     "minLength": 1,
+     "title": "Enrollment Token",
+     "type": "string",
+     "writeOnly": true
+    },
+    "hardware_fingerprint": {
+     "maxLength": 256,
+     "minLength": 1,
+     "title": "Hardware Fingerprint",
+     "type": "string"
+    },
+    "hostname": {
+     "maxLength": 255,
+     "minLength": 1,
+     "title": "Hostname",
+     "type": "string"
+    }
+   },
+   "required": [
+    "enrollment_token",
+    "hostname",
+    "hardware_fingerprint"
+   ],
+   "title": "EnrollRequest",
+   "type": "object"
+  },
+  "EnrollResponse": {
+   "description": "The device secret is shown once; the device stores it with DPAPI.",
+   "properties": {
+    "device_secret": {
+     "format": "password",
+     "minLength": 1,
+     "title": "Device Secret",
+     "type": "string",
+     "writeOnly": true
+    },
+    "server_time": {
+     "format": "date-time",
+     "title": "Server Time",
+     "type": "string"
+    },
+    "workstation_id": {
+     "format": "uuid",
+     "title": "Workstation Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "workstation_id",
+    "device_secret",
+    "server_time"
+   ],
+   "title": "EnrollResponse",
+   "type": "object"
+  },
+  "EventBatch": {
+   "$defs": {
+    "AttentionEventItem": {
+     "description": "`attention_event` item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "$ref": "#/$defs/AttentionEventPayload"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "const": "attention_event",
+       "default": "attention_event",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "payload"
+     ],
+     "title": "AttentionEventItem",
+     "type": "object"
+    },
+    "AttentionEventKind": {
+     "description": "`attention_event.kind`.",
+     "enum": [
+      "scan_warning",
+      "state_episode"
+     ],
+     "title": "AttentionEventKind",
+     "type": "string"
+    },
+    "AttentionEventPayload": {
+     "description": "A scan warning or a state episode.",
+     "properties": {
+      "camera_states": {
+       "default": [],
+       "items": {
+        "$ref": "#/$defs/CameraStateSnapshot"
+       },
+       "title": "Camera States",
+       "type": "array"
+      },
+      "confidence": {
+       "anyOf": [
+        {
+         "maximum": 1,
+         "minimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Confidence"
+      },
+      "config_version": {
+       "default": 0,
+       "minimum": 0,
+       "title": "Config Version",
+       "type": "integer"
+      },
+      "ended_at": {
+       "anyOf": [
+        {
+         "format": "date-time",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ended At"
+      },
+      "engine_version": {
+       "default": "",
+       "maxLength": 64,
+       "title": "Engine Version",
+       "type": "string"
+      },
+      "image_ids": {
+       "default": [],
+       "items": {
+        "format": "uuid",
+        "type": "string"
+       },
+       "title": "Image Ids",
+       "type": "array"
+      },
+      "images_withheld": {
+       "$ref": "#/$defs/ImagesWithheld",
+       "default": "none"
+      },
+      "kind": {
+       "$ref": "#/$defs/AttentionEventKind"
+      },
+      "low_confidence": {
+       "default": false,
+       "title": "Low Confidence",
+       "type": "boolean"
+      },
+      "scan_id": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Scan Id"
+      },
+      "session_id": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Session Id"
+      },
+      "signals": {
+       "additionalProperties": {
+        "anyOf": [
+         {
+          "type": "number"
+         },
+         {
+          "type": "null"
+         }
+        ]
+       },
+       "propertyNames": {
+        "maxLength": 64
+       },
+       "title": "Signals",
+       "type": "object"
+      },
+      "started_at": {
+       "format": "date-time",
+       "title": "Started At",
+       "type": "string"
+      },
+      "state": {
+       "$ref": "#/$defs/AttentionState"
+      },
+      "user_id": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "User Id"
+      }
+     },
+     "required": [
+      "kind",
+      "state",
+      "started_at"
+     ],
+     "title": "AttentionEventPayload",
+     "type": "object"
+    },
+    "AttentionState": {
+     "description": "State of one camera candidate or of the whole station.",
+     "enum": [
+      "attentive",
+      "distracted",
+      "drowsy",
+      "sleeping",
+      "absent",
+      "unknown",
+      "on_break"
+     ],
+     "title": "AttentionState",
+     "type": "string"
+    },
+    "BucketItem": {
+     "description": "`bucket` item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "$ref": "#/$defs/BucketPayload"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "const": "bucket",
+       "default": "bucket",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "payload"
+     ],
+     "title": "BucketItem",
+     "type": "object"
+    },
+    "BucketPayload": {
+     "description": "Seconds per state in one closed minute.",
+     "properties": {
+      "bucket_start": {
+       "format": "date-time",
+       "title": "Bucket Start",
+       "type": "string"
+      },
+      "seconds": {
+       "additionalProperties": {
+        "maximum": 60,
+        "minimum": 0,
+        "type": "number"
+       },
+       "propertyNames": {
+        "$ref": "#/$defs/AttentionState"
+       },
+       "title": "Seconds",
+       "type": "object"
+      },
+      "user_id": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "User Id"
+      }
+     },
+     "required": [
+      "bucket_start",
+      "seconds"
+     ],
+     "title": "BucketPayload",
+     "type": "object"
+    },
+    "CameraHeartbeat": {
+     "description": "One camera in a heartbeat or health sample.",
+     "properties": {
+      "fps": {
+       "default": 0.0,
+       "minimum": 0,
+       "title": "Fps",
+       "type": "number"
+      },
+      "quality": {
+       "anyOf": [
+        {
+         "maximum": 1,
+         "minimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Quality"
+      },
+      "slot": {
+       "maximum": 4,
+       "minimum": 1,
+       "title": "Slot",
+       "type": "integer"
+      },
+      "status": {
+       "$ref": "#/$defs/CameraStatus"
+      }
+     },
+     "required": [
+      "slot",
+      "status"
+     ],
+     "title": "CameraHeartbeat",
+     "type": "object"
+    },
+    "CameraStateSnapshot": {
+     "description": "One camera's view at an event (`attention_event.camera_states`).",
+     "properties": {
+      "quality": {
+       "anyOf": [
+        {
+         "maximum": 1,
+         "minimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Quality"
+      },
+      "slot": {
+       "maximum": 4,
+       "minimum": 1,
+       "title": "Slot",
+       "type": "integer"
+      },
+      "state": {
+       "$ref": "#/$defs/AttentionState"
+      },
+      "status": {
+       "$ref": "#/$defs/CameraStatus"
+      },
+      "usable": {
+       "default": false,
+       "title": "Usable",
+       "type": "boolean"
+      }
+     },
+     "required": [
+      "slot",
+      "status",
+      "state"
+     ],
+     "title": "CameraStateSnapshot",
+     "type": "object"
+    },
+    "CameraStatus": {
+     "description": "Status of one camera as reported in health and heartbeats.",
+     "enum": [
+      "starting",
+      "online",
+      "offline",
+      "stopped"
+     ],
+     "title": "CameraStatus",
+     "type": "string"
+    },
+    "DisputeItem": {
+     "description": "`dispute` item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "$ref": "#/$defs/DisputePayload"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "const": "dispute",
+       "default": "dispute",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "payload"
+     ],
+     "title": "DisputeItem",
+     "type": "object"
+    },
+    "DisputePayload": {
+     "description": "A worker's dispute of one of their events.",
+     "properties": {
+      "attention_event_id": {
+       "format": "uuid",
+       "title": "Attention Event Id",
+       "type": "string"
+      },
+      "message": {
+       "maxLength": 2000,
+       "minLength": 1,
+       "title": "Message",
+       "type": "string"
+      },
+      "user_id": {
+       "format": "uuid",
+       "title": "User Id",
+       "type": "string"
+      }
+     },
+     "required": [
+      "attention_event_id",
+      "user_id",
+      "message"
+     ],
+     "title": "DisputePayload",
+     "type": "object"
+    },
+    "EngineStatus": {
+     "description": "Status of the detection engine process (PLAN 1.8, 2.3).",
+     "enum": [
+      "starting",
+      "running",
+      "degraded",
+      "restarting",
+      "down",
+      "unknown"
+     ],
+     "title": "EngineStatus",
+     "type": "string"
+    },
+    "HealthItem": {
+     "description": "`health` item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "$ref": "#/$defs/HealthPayload"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "const": "health",
+       "default": "health",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "payload"
+     ],
+     "title": "HealthItem",
+     "type": "object"
+    },
+    "HealthPayload": {
+     "description": "One-minute health sample (`device_health`).",
+     "properties": {
+      "app_version": {
+       "default": "",
+       "maxLength": 64,
+       "title": "App Version",
+       "type": "string"
+      },
+      "cameras": {
+       "default": [],
+       "items": {
+        "$ref": "#/$defs/CameraHeartbeat"
+       },
+       "title": "Cameras",
+       "type": "array"
+      },
+      "clock_offset_ms": {
+       "default": 0,
+       "title": "Clock Offset Ms",
+       "type": "integer"
+      },
+      "cpu_pct": {
+       "anyOf": [
+        {
+         "maximum": 100,
+         "minimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Cpu Pct"
+      },
+      "dead_letter_count": {
+       "default": 0,
+       "minimum": 0,
+       "title": "Dead Letter Count",
+       "type": "integer"
+      },
+      "disk_free_mb": {
+       "anyOf": [
+        {
+         "minimum": 0,
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Disk Free Mb"
+      },
+      "engine_restarts": {
+       "default": 0,
+       "minimum": 0,
+       "title": "Engine Restarts",
+       "type": "integer"
+      },
+      "engine_status": {
+       "$ref": "#/$defs/EngineStatus"
+      },
+      "mem_pct": {
+       "anyOf": [
+        {
+         "maximum": 100,
+         "minimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Mem Pct"
+      },
+      "queue_depth": {
+       "default": 0,
+       "minimum": 0,
+       "title": "Queue Depth",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "engine_status"
+     ],
+     "title": "HealthPayload",
+     "type": "object"
+    },
+    "ImagesWithheld": {
+     "description": "Why an event has no (or fewer) images (`attention_event.images_withheld`).",
+     "enum": [
+      "none",
+      "no_consent",
+      "no_worker",
+      "disk_full"
+     ],
+     "title": "ImagesWithheld",
+     "type": "string"
+    },
+    "JsonValue": {},
+    "LocalAlertItem": {
+     "description": "`local_alert` item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "$ref": "#/$defs/LocalAlertPayload"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "const": "local_alert",
+       "default": "local_alert",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "payload"
+     ],
+     "title": "LocalAlertItem",
+     "type": "object"
+    },
+    "LocalAlertKind": {
+     "description": "Alerts the workstation raises itself; the server maps them to `alert.kind`.",
+     "enum": [
+      "camera_offline",
+      "monitoring_unavailable",
+      "engine_restart",
+      "disk_full",
+      "clock_drift",
+      "other"
+     ],
+     "title": "LocalAlertKind",
+     "type": "string"
+    },
+    "LocalAlertPayload": {
+     "description": "A locally detected problem.",
+     "properties": {
+      "detail": {
+       "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+       },
+       "title": "Detail",
+       "type": "object"
+      },
+      "kind": {
+       "$ref": "#/$defs/LocalAlertKind"
+      }
+     },
+     "required": [
+      "kind"
+     ],
+     "title": "LocalAlertPayload",
+     "type": "object"
+    },
+    "ScanItem": {
+     "description": "`scan` item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "$ref": "#/$defs/ScanPayload"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "const": "scan",
+       "default": "scan",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "payload"
+     ],
+     "title": "ScanItem",
+     "type": "object"
+    },
+    "ScanOutcome": {
+     "description": "What a scan was recorded as. The scan is accepted in every case.",
+     "enum": [
+      "attentive",
+      "warned",
+      "unmonitored"
+     ],
+     "title": "ScanOutcome",
+     "type": "string"
+    },
+    "ScanPayload": {
+     "description": "A scan. `occurred_at` is `scanned_at`. No session: an unattributed scan.",
+     "properties": {
+      "barcode": {
+       "maxLength": 4096,
+       "title": "Barcode",
+       "type": "string"
+      },
+      "confidence": {
+       "anyOf": [
+        {
+         "maximum": 1,
+         "minimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Confidence"
+      },
+      "outcome": {
+       "$ref": "#/$defs/ScanOutcome"
+      },
+      "session_id": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Session Id"
+      },
+      "state_at_scan": {
+       "$ref": "#/$defs/AttentionState"
+      },
+      "user_id": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "User Id"
+      }
+     },
+     "required": [
+      "barcode",
+      "state_at_scan",
+      "outcome"
+     ],
+     "title": "ScanPayload",
+     "type": "object"
+    },
+    "SessionEndItem": {
+     "description": "`session_end` item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "$ref": "#/$defs/SessionEndPayload"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "const": "session_end",
+       "default": "session_end",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "payload"
+     ],
+     "title": "SessionEndItem",
+     "type": "object"
+    },
+    "SessionEndPayload": {
+     "description": "`occurred_at` is `ended_at`.",
+     "properties": {
+      "end_reason": {
+       "$ref": "#/$defs/SessionEndReason"
+      },
+      "session_id": {
+       "format": "uuid",
+       "title": "Session Id",
+       "type": "string"
+      }
+     },
+     "required": [
+      "session_id",
+      "end_reason"
+     ],
+     "title": "SessionEndPayload",
+     "type": "object"
+    },
+    "SessionEndReason": {
+     "description": "Why a session ended (`worker_session.end_reason`).",
+     "enum": [
+      "logout",
+      "timeout",
+      "shift_end",
+      "replaced"
+     ],
+     "title": "SessionEndReason",
+     "type": "string"
+    },
+    "SessionMethod": {
+     "description": "How a worker session started (`worker_session.method`).",
+     "enum": [
+      "employee_id_pin",
+      "supervisor_assigned"
+     ],
+     "title": "SessionMethod",
+     "type": "string"
+    },
+    "SessionStartItem": {
+     "description": "`session_start` item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "$ref": "#/$defs/SessionStartPayload"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "const": "session_start",
+       "default": "session_start",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "payload"
+     ],
+     "title": "SessionStartItem",
+     "type": "object"
+    },
+    "SessionStartPayload": {
+     "description": "The item `id` is the session id; `occurred_at` is `started_at`.",
+     "properties": {
+      "method": {
+       "$ref": "#/$defs/SessionMethod"
+      },
+      "ppe_profile_id": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Ppe Profile Id"
+      },
+      "station_assignment_id": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Station Assignment Id"
+      },
+      "user_id": {
+       "format": "uuid",
+       "title": "User Id",
+       "type": "string"
+      }
+     },
+     "required": [
+      "user_id",
+      "method"
+     ],
+     "title": "SessionStartPayload",
+     "type": "object"
+    },
+    "UnknownEventItem": {
+     "description": "An item type this side does not know; the server answers `rejected`.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+       },
+       "title": "Payload",
+       "type": "object"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "type"
+     ],
+     "title": "UnknownEventItem",
+     "type": "object"
+    }
+   },
+   "description": "`POST /events:batch` body, typed. A retry resends the same `batch_id`.",
+   "properties": {
+    "batch_id": {
+     "format": "uuid",
+     "title": "Batch Id",
+     "type": "string"
+    },
+    "items": {
+     "items": {
+      "oneOf": [
+       {
+        "$ref": "#/$defs/SessionStartItem"
+       },
+       {
+        "$ref": "#/$defs/SessionEndItem"
+       },
+       {
+        "$ref": "#/$defs/ScanItem"
+       },
+       {
+        "$ref": "#/$defs/AttentionEventItem"
+       },
+       {
+        "$ref": "#/$defs/BucketItem"
+       },
+       {
+        "$ref": "#/$defs/DisputeItem"
+       },
+       {
+        "$ref": "#/$defs/HealthItem"
+       },
+       {
+        "$ref": "#/$defs/LocalAlertItem"
+       },
+       {
+        "$ref": "#/$defs/UnknownEventItem"
+       }
+      ]
+     },
+     "maxItems": 200,
+     "title": "Items",
+     "type": "array"
+    },
+    "sent_at": {
+     "format": "date-time",
+     "title": "Sent At",
+     "type": "string"
+    }
+   },
+   "required": [
+    "batch_id",
+    "sent_at",
+    "items"
+   ],
+   "title": "EventBatch",
+   "type": "object"
+  },
+  "EvidenceUploadHeaders": {
+   "description": "The metadata headers of one evidence upload.",
+   "properties": {
+    "camera_slot": {
+     "maximum": 4,
+     "minimum": 1,
+     "title": "Camera Slot",
+     "type": "integer"
+    },
+    "captured_at": {
+     "format": "date-time",
+     "title": "Captured At",
+     "type": "string"
+    },
+    "event_id": {
+     "format": "uuid",
+     "title": "Event Id",
+     "type": "string"
+    },
+    "offset_ms": {
+     "title": "Offset Ms",
+     "type": "integer"
+    },
+    "seq": {
+     "minimum": 0,
+     "title": "Seq",
+     "type": "integer"
+    },
+    "sha256": {
+     "pattern": "^[0-9a-f]{64}$",
+     "title": "Sha256",
+     "type": "string"
+    }
+   },
+   "required": [
+    "event_id",
+    "camera_slot",
+    "seq",
+    "offset_ms",
+    "captured_at",
+    "sha256"
+   ],
+   "title": "EvidenceUploadHeaders",
+   "type": "object"
+  },
+  "HeartbeatRequest": {
+   "$defs": {
+    "AttentionState": {
+     "description": "State of one camera candidate or of the whole station.",
+     "enum": [
+      "attentive",
+      "distracted",
+      "drowsy",
+      "sleeping",
+      "absent",
+      "unknown",
+      "on_break"
+     ],
+     "title": "AttentionState",
+     "type": "string"
+    },
+    "CameraHeartbeat": {
+     "description": "One camera in a heartbeat or health sample.",
+     "properties": {
+      "fps": {
+       "default": 0.0,
+       "minimum": 0,
+       "title": "Fps",
+       "type": "number"
+      },
+      "quality": {
+       "anyOf": [
+        {
+         "maximum": 1,
+         "minimum": 0,
+         "type": "number"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Quality"
+      },
+      "slot": {
+       "maximum": 4,
+       "minimum": 1,
+       "title": "Slot",
+       "type": "integer"
+      },
+      "status": {
+       "$ref": "#/$defs/CameraStatus"
+      }
+     },
+     "required": [
+      "slot",
+      "status"
+     ],
+     "title": "CameraHeartbeat",
+     "type": "object"
+    },
+    "CameraStatus": {
+     "description": "Status of one camera as reported in health and heartbeats.",
+     "enum": [
+      "starting",
+      "online",
+      "offline",
+      "stopped"
+     ],
+     "title": "CameraStatus",
+     "type": "string"
+    },
+    "EngineStatus": {
+     "description": "Status of the detection engine process (PLAN 1.8, 2.3).",
+     "enum": [
+      "starting",
+      "running",
+      "degraded",
+      "restarting",
+      "down",
+      "unknown"
+     ],
+     "title": "EngineStatus",
+     "type": "string"
+    },
+    "RejectedConfig": {
+     "description": "A config bundle the client refused; the previous one stays active.",
+     "properties": {
+      "reason": {
+       "maxLength": 500,
+       "title": "Reason",
+       "type": "string"
+      },
+      "version": {
+       "minimum": 0,
+       "title": "Version",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "version",
+      "reason"
+     ],
+     "title": "RejectedConfig",
+     "type": "object"
+    }
+   },
+   "description": "`POST /heartbeat`, every 2 s while online.",
+   "properties": {
+    "acked_commands": {
+     "default": [],
+     "items": {
+      "format": "uuid",
+      "type": "string"
+     },
+     "title": "Acked Commands",
+     "type": "array"
+    },
+    "applied_config_version": {
+     "anyOf": [
+      {
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Applied Config Version"
+    },
+    "cameras": {
+     "default": [],
+     "items": {
+      "$ref": "#/$defs/CameraHeartbeat"
+     },
+     "title": "Cameras",
+     "type": "array"
+    },
+    "clock_offset_ms": {
+     "default": 0,
+     "title": "Clock Offset Ms",
+     "type": "integer"
+    },
+    "confidence": {
+     "anyOf": [
+      {
+       "maximum": 1,
+       "minimum": 0,
+       "type": "number"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Confidence"
+    },
+    "disk_free_mb": {
+     "anyOf": [
+      {
+       "minimum": 0,
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Disk Free Mb"
+    },
+    "engine_status": {
+     "$ref": "#/$defs/EngineStatus"
+    },
+    "low_confidence": {
+     "default": false,
+     "title": "Low Confidence",
+     "type": "boolean"
+    },
+    "oldest_unsent_at": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Oldest Unsent At"
+    },
+    "queue_depth": {
+     "default": 0,
+     "minimum": 0,
+     "title": "Queue Depth",
+     "type": "integer"
+    },
+    "rejected_config": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/RejectedConfig"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "sent_at": {
+     "format": "date-time",
+     "title": "Sent At",
+     "type": "string"
+    },
+    "seq": {
+     "minimum": 0,
+     "title": "Seq",
+     "type": "integer"
+    },
+    "session_id": {
+     "anyOf": [
+      {
+       "format": "uuid",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Session Id"
+    },
+    "shift_counters": {
+     "additionalProperties": {
+      "minimum": 0,
+      "type": "integer"
+     },
+     "propertyNames": {
+      "$ref": "#/$defs/AttentionState"
+     },
+     "title": "Shift Counters",
+     "type": "object"
+    },
+    "state": {
+     "$ref": "#/$defs/AttentionState"
+    },
+    "worker_user_id": {
+     "anyOf": [
+      {
+       "format": "uuid",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Worker User Id"
+    }
+   },
+   "required": [
+    "seq",
+    "sent_at",
+    "state",
+    "engine_status"
+   ],
+   "title": "HeartbeatRequest",
+   "type": "object"
+  },
+  "HeartbeatResponse": {
+   "$defs": {
+    "AssignWorkerCommand": {
+     "description": "Start a `supervisor_assigned` session.",
+     "properties": {
+      "assignment_id": {
+       "format": "uuid",
+       "title": "Assignment Id",
+       "type": "string"
+      },
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "type": {
+       "const": "assign_worker",
+       "default": "assign_worker",
+       "title": "Type",
+       "type": "string"
+      },
+      "user_id": {
+       "format": "uuid",
+       "title": "User Id",
+       "type": "string"
+      },
+      "valid_until": {
+       "format": "date-time",
+       "title": "Valid Until",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "assignment_id",
+      "user_id",
+      "valid_until"
+     ],
+     "title": "AssignWorkerCommand",
+     "type": "object"
+    },
+    "EndSessionCommand": {
+     "description": "End the worker session.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "session_id": {
+       "format": "uuid",
+       "title": "Session Id",
+       "type": "string"
+      },
+      "type": {
+       "const": "end_session",
+       "default": "end_session",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "session_id"
+     ],
+     "title": "EndSessionCommand",
+     "type": "object"
+    },
+    "LiveStillCommand": {
+     "description": "Post one frame to `/live/{request_id}/frame`; never store it.",
+     "properties": {
+      "camera_slot": {
+       "maximum": 4,
+       "minimum": 1,
+       "title": "Camera Slot",
+       "type": "integer"
+      },
+      "expires_at": {
+       "format": "date-time",
+       "title": "Expires At",
+       "type": "string"
+      },
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "request_id": {
+       "format": "uuid",
+       "title": "Request Id",
+       "type": "string"
+      },
+      "type": {
+       "const": "live_still",
+       "default": "live_still",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "request_id",
+      "camera_slot",
+      "expires_at"
+     ],
+     "title": "LiveStillCommand",
+     "type": "object"
+    },
+    "LiveVideoCommand": {
+     "description": "Open the live stream, only if the site setting allows it.",
+     "properties": {
+      "camera_slot": {
+       "maximum": 4,
+       "minimum": 1,
+       "title": "Camera Slot",
+       "type": "integer"
+      },
+      "expires_at": {
+       "format": "date-time",
+       "title": "Expires At",
+       "type": "string"
+      },
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "session_id": {
+       "format": "uuid",
+       "title": "Session Id",
+       "type": "string"
+      },
+      "type": {
+       "const": "live_video",
+       "default": "live_video",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "session_id",
+      "camera_slot",
+      "expires_at"
+     ],
+     "title": "LiveVideoCommand",
+     "type": "object"
+    },
+    "PullConfigCommand": {
+     "description": "Fetch the config bundle now.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "type": {
+       "const": "pull_config",
+       "default": "pull_config",
+       "title": "Type",
+       "type": "string"
+      },
+      "version": {
+       "minimum": 0,
+       "title": "Version",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "id",
+      "version"
+     ],
+     "title": "PullConfigCommand",
+     "type": "object"
+    },
+    "RotateSecretCommand": {
+     "description": "Call `/secret/rotate`.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "type": {
+       "const": "rotate_secret",
+       "default": "rotate_secret",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id"
+     ],
+     "title": "RotateSecretCommand",
+     "type": "object"
+    },
+    "UnknownCommand": {
+     "description": "A command type this client does not know. It is logged and not executed.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "type": {
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "type"
+     ],
+     "title": "UnknownCommand",
+     "type": "object"
+    }
+   },
+   "description": "Server time, the current config version and pending commands.",
+   "properties": {
+    "commands": {
+     "default": [],
+     "items": {
+      "oneOf": [
+       {
+        "$ref": "#/$defs/AssignWorkerCommand"
+       },
+       {
+        "$ref": "#/$defs/EndSessionCommand"
+       },
+       {
+        "$ref": "#/$defs/LiveStillCommand"
+       },
+       {
+        "$ref": "#/$defs/LiveVideoCommand"
+       },
+       {
+        "$ref": "#/$defs/PullConfigCommand"
+       },
+       {
+        "$ref": "#/$defs/RotateSecretCommand"
+       },
+       {
+        "$ref": "#/$defs/UnknownCommand"
+       }
+      ]
+     },
+     "title": "Commands",
+     "type": "array"
+    },
+    "config_version": {
+     "minimum": 0,
+     "title": "Config Version",
+     "type": "integer"
+    },
+    "server_time": {
+     "format": "date-time",
+     "title": "Server Time",
+     "type": "string"
+    }
+   },
+   "required": [
+    "server_time",
+    "config_version"
+   ],
+   "title": "HeartbeatResponse",
+   "type": "object"
+  },
+  "Problem": {
+   "description": "An `application/problem+json` body.",
+   "properties": {
+    "code": {
+     "anyOf": [
+      {
+       "maxLength": 100,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Code"
+    },
+    "detail": {
+     "anyOf": [
+      {
+       "maxLength": 2000,
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Detail"
+    },
+    "status": {
+     "maximum": 599,
+     "minimum": 100,
+     "title": "Status",
+     "type": "integer"
+    },
+    "title": {
+     "default": "",
+     "maxLength": 200,
+     "title": "Title",
+     "type": "string"
+    },
+    "type": {
+     "default": "about:blank",
+     "title": "Type",
+     "type": "string"
+    }
+   },
+   "required": [
+    "status"
+   ],
+   "title": "Problem",
+   "type": "object"
+  },
+  "RawEventBatch": {
+   "$defs": {
+    "JsonValue": {}
+   },
+   "description": "The batch envelope with unvalidated items (server side).",
+   "properties": {
+    "batch_id": {
+     "format": "uuid",
+     "title": "Batch Id",
+     "type": "string"
+    },
+    "items": {
+     "items": {
+      "additionalProperties": {
+       "$ref": "#/$defs/JsonValue"
+      },
+      "type": "object"
+     },
+     "maxItems": 200,
+     "title": "Items",
+     "type": "array"
+    },
+    "sent_at": {
+     "format": "date-time",
+     "title": "Sent At",
+     "type": "string"
+    }
+   },
+   "required": [
+    "batch_id",
+    "sent_at",
+    "items"
+   ],
+   "title": "RawEventBatch",
+   "type": "object"
+  },
+  "RotateSecretRequest": {
+   "description": "`POST /secret/rotate`: no body fields; the device is taken from the token.",
+   "properties": {},
+   "title": "RotateSecretRequest",
+   "type": "object"
+  },
+  "RotateSecretResponse": {
+   "description": "The new secret. The old one stays valid for 10 minutes.",
+   "properties": {
+    "device_secret": {
+     "format": "password",
+     "minLength": 1,
+     "title": "Device Secret",
+     "type": "string",
+     "writeOnly": true
+    },
+    "previous_valid_until": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Previous Valid Until"
+    },
+    "server_time": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Server Time"
+    }
+   },
+   "required": [
+    "device_secret"
+   ],
+   "title": "RotateSecretResponse",
+   "type": "object"
+  },
+  "TokenRequest": {
+   "description": "`POST /token`.",
+   "properties": {
+    "device_secret": {
+     "format": "password",
+     "minLength": 1,
+     "title": "Device Secret",
+     "type": "string",
+     "writeOnly": true
+    },
+    "workstation_id": {
+     "format": "uuid",
+     "title": "Workstation Id",
+     "type": "string"
+    }
+   },
+   "required": [
+    "workstation_id",
+    "device_secret"
+   ],
+   "title": "TokenRequest",
+   "type": "object"
+  },
+  "TokenResponse": {
+   "description": "A device JWT (15 minutes). `server_time` is optional for older servers.",
+   "properties": {
+    "access_token": {
+     "format": "password",
+     "minLength": 1,
+     "title": "Access Token",
+     "type": "string",
+     "writeOnly": true
+    },
+    "expires_in": {
+     "exclusiveMinimum": 0,
+     "title": "Expires In",
+     "type": "integer"
+    },
+    "server_time": {
+     "anyOf": [
+      {
+       "format": "date-time",
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Server Time"
+    }
+   },
+   "required": [
+    "access_token",
+    "expires_in"
+   ],
+   "title": "TokenResponse",
+   "type": "object"
+  }
+ }
+}

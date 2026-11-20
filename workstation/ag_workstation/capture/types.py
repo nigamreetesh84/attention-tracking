@@ -3,11 +3,11 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import StrEnum
 from typing import Protocol
 
 import numpy as np
 import numpy.typing as npt
+from ag_shared.health import CameraStatus as CameraStatus
 
 Image = npt.NDArray[np.uint8]
 """A BGR image, shape (height, width, 3), as OpenCV delivers it."""
@@ -22,18 +22,6 @@ class CaptureError(Exception):
 
 class EndOfStream(CaptureError):  # noqa: N818 - a signal, not an error condition
     """A finite source (a video file) has no more frames. Not a failure."""
-
-
-class CameraStatus(StrEnum):
-    """Status of one camera as reported in health and heartbeats."""
-
-    STARTING = "starting"
-    """Not yet delivered a frame and not yet failed."""
-    ONLINE = "online"
-    OFFLINE = "offline"
-    """Failed, hung or stale; reconnecting with backoff."""
-    STOPPED = "stopped"
-    """Stopped on request or at the end of a finite stream."""
 
 
 @dataclass(frozen=True, slots=True)
