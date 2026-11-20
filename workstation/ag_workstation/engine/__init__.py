@@ -7,6 +7,7 @@ taken from the frames, so it runs deterministically in CI and in replays.
 """
 
 from ag_workstation.engine.estimator import CameraEstimator, EstimatorParams
+from ag_workstation.engine.fusion import DegradedTracker, fuse
 from ag_workstation.engine.timers import ConditionTimer, EdgeCounter, ShareWindow
 from ag_workstation.engine.types import CameraCandidate, FusedState
 
@@ -14,8 +15,10 @@ __all__ = [
     "CameraCandidate",
     "CameraEstimator",
     "ConditionTimer",
+    "DegradedTracker",
     "EdgeCounter",
     "EstimatorParams",
     "FusedState",
     "ShareWindow",
+    "fuse",
 ]
