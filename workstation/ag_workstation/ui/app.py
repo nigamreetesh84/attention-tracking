@@ -174,6 +174,11 @@ class Assembly:
     engine_mode: str
     """`ipc`, `fake` or `unreachable`."""
     fake_engine: FakeStationEngine | None = None
+    flow: ScanFlow | None = None
+    """The scan flow the presenter records through (tests, health)."""
+    manager: SessionManager | None = None
+    pusher: SessionPusher | None = None
+    """Pushes the open session to the engine child (None without a control client)."""
     closers: list[Callable[[], None]] = field(default_factory=list)
 
     def close(self) -> None:
@@ -400,7 +405,9 @@ def assemble(
     presenter = AppPresenter(
         scan=scan, login=login, parser=KeyboardWedgeParser(clock), record=record
     )
-    return Assembly(presenter, mode, fake, closers)
+    return Assembly(
+        presenter, mode, fake, flow=flow, manager=manager, pusher=pusher, closers=closers
+    )
 
 
 def _open_record(data_dir: Path, keys: KeyProvider, clock: Clock) -> PersonalRecordStore | None:

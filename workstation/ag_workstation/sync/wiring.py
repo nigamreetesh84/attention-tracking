@@ -22,7 +22,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Final, Protocol
 
-from ag_shared.api import EventType
+from ag_shared.api import EventType, LocalAlertPayload
 
 from ag_workstation.clock import Clock
 from ag_workstation.engine_api import EngineHealth, StationState
@@ -36,6 +36,7 @@ from ag_workstation.service.health import (
     disk_free_mb_hook,
     standard_housekeeping,
 )
+from ag_workstation.service.monitoring_alerts import CHECK_INTERVAL_S, MonitoringAlerter
 from ag_workstation.service.supervisor import SupervisorHealthSource
 from ag_workstation.sync.api import DeviceApi
 from ag_workstation.sync.client import SyncClient, SyncEvidence
@@ -273,12 +274,17 @@ def service_components(
     supervisor: SupervisorHealthSource,
     state: CurrentStateSource | None = None,
     engine_health: Callable[[], EngineHealth] | None = None,
+    transport: SyncTransport | None = None,
+    credentials: CredentialStore | None = None,
 ) -> ServiceComponents:
     """Sync (if configured), housekeeping (dead letters, evidence age and
-    quota, old commands) and the one-minute health sample. Never raises.
+    quota, old commands), the one-minute health sample and the camera /
+    monitoring alerts (scope 4.4). Never raises.
 
     The evidence store is opened here, before the engine child starts,
-    because opening it sweeps temporary files.
+    because opening it sweeps temporary files. `transport` (and
+    `credentials`) replace the environment's server settings (tests, the
+    fail-open suite).
     """
     closers: list[Callable[[], None]] = []
     evidence: EvidenceStore | None = None
@@ -294,15 +300,33 @@ def service_components(
         queue_stats=queue.stats,
         disk_free_mb=disk_free_mb_hook(data_dir),
     )
-    sync = sync_service_from_env(
-        env,
-        data_dir=data_dir,
-        keys=keys,
-        queue=queue,
-        clock=clock,
-        evidence=evidence,
-        status=ServiceStatusSource(reporter, state),
-    )
+    status = ServiceStatusSource(reporter, state)
+    sync: SyncService | None
+    if transport is not None:
+        try:
+            sync = build_sync_service(
+                data_dir=data_dir,
+                keys=keys,
+                queue=queue,
+                clock=clock,
+                transport=transport,
+                credentials=credentials,
+                evidence=evidence,
+                status=status,
+            )
+        except Exception as exc:
+            logger.error("sync disabled (%s)", type(exc).__name__)
+            sync = None
+    else:
+        sync = sync_service_from_env(
+            env,
+            data_dir=data_dir,
+            keys=keys,
+            queue=queue,
+            clock=clock,
+            evidence=evidence,
+            status=status,
+        )
     keeper = standard_housekeeping(clock, queue=queue, evidence=evidence)
     offset = (lambda: sync.client.health().clock_offset_ms) if sync is not None else (lambda: 0)
     keeper.add(
@@ -310,6 +334,15 @@ def service_components(
         HEALTH_SAMPLE_S,
         HealthSampler(reporter, queue, clock, offset=offset),
         run_first=False,
+    )
+
+    def queue_alert(payload: LocalAlertPayload) -> None:
+        queue.enqueue(EventType.LOCAL_ALERT, payload, clock.now())
+
+    keeper.add(
+        "monitoring_alerts",
+        CHECK_INTERVAL_S,
+        MonitoringAlerter(clock, reporter.snapshot, queue_alert),
     )
     if sync is not None:
         keeper.add("purge_commands", HOUSEKEEPING_INTERVAL_S, sync.purge)

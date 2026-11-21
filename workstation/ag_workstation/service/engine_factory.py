@@ -190,9 +190,13 @@ def build_station(
     start: bool = True,
     tick_interval_s: float = 0.1,
     pump_interval_s: float = PUMP_INTERVAL_S,
+    evidence_disk_free: Callable[[Path], int] | None = None,
 ) -> StationChild:
     """Assemble the real engine and its evidence path. Never raises for
-    missing hardware, models, config or storage (see the module docstring)."""
+    missing hardware, models, config or storage (see the module docstring).
+
+    `evidence_disk_free` replaces the evidence store's free-space probe
+    (tests: a full disk without filling one)."""
     from ag_workstation.evidence.alerts import QueueDiskFullAlert
     from ag_workstation.evidence.store import EvidenceStore
     from ag_workstation.queue import EventQueue
@@ -213,8 +217,17 @@ def build_station(
             # Enqueue only: the service parent is the queue's single sender.
             queue = EventQueue.open(data_dir / "queue.db", keys, clock, recover_sending=False)
             closers.append(queue.close)
-            store = EvidenceStore.open(
-                data_dir / "evidence", keys, clock, alert_sink=QueueDiskFullAlert(queue, clock)
+            alert_sink = QueueDiskFullAlert(queue, clock)
+            store = (
+                EvidenceStore.open(data_dir / "evidence", keys, clock, alert_sink=alert_sink)
+                if evidence_disk_free is None
+                else EvidenceStore.open(
+                    data_dir / "evidence",
+                    keys,
+                    clock,
+                    alert_sink=alert_sink,
+                    disk_free=evidence_disk_free,
+                )
             )
             closers.append(store.close)
         except Exception as exc:
