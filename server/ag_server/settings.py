@@ -13,7 +13,7 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy.engine import make_url
@@ -41,6 +41,11 @@ MIN_SECRET_LENGTH: Final = 32
 DEFAULT_APP_ROLE: Final = "attentionguard_app"
 _ROLE_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 
+DEFAULT_IDLE_MINUTES: Final = 15
+DEFAULT_ABSOLUTE_MINUTES: Final = 8 * 60
+DEFAULT_MFA_PENDING_MINUTES: Final = 5
+CONSOLE_ROLES: Final[tuple[str, ...]] = ("admin", "supervisor")
+
 _DEV_DATABASE_URL: Final = "postgresql+psycopg://attentionguard@localhost:5432/attentionguard"
 _DEV_KEK: Final = "dev-insecure-kek-do-not-use-in-production"
 _DEV_JWT: Final = "dev-insecure-jwt-key-do-not-use-in-production"
@@ -60,6 +65,13 @@ class Settings(BaseModel):
     # Release 1 refuses to enable blocking (CLAUDE.md rule 1); the field exists
     # so the refusal is explicit.
     blocking_mode: bool = False
+    # Console sessions (security-privacy 3). Server-wide for now: per-site
+    # values need new `site.settings` keys, which is an owner decision.
+    session_idle_minutes: int = DEFAULT_IDLE_MINUTES
+    session_absolute_minutes: int = DEFAULT_ABSOLUTE_MINUTES
+    # Lifetime of a session that has passed the password but not yet MFA.
+    mfa_pending_minutes: int = DEFAULT_MFA_PENDING_MINUTES
+    mfa_required_roles: tuple[str, ...] = ("admin",)
 
 
 def _read_secret(env: Mapping[str, str], name: str, problems: list[str]) -> str | None:
@@ -118,6 +130,57 @@ def _parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _read_minutes(
+    env: Mapping[str, str], name: str, default: int, low: int, high: int, problems: list[str]
+) -> int:
+    raw = env.get(f"AG_{name}")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        problems.append(f"AG_{name}: must be a whole number of minutes")
+        return default
+    if not low <= value <= high:
+        problems.append(f"AG_{name}: must be between {low} and {high}")
+        return default
+    return value
+
+
+class _SessionValues(TypedDict):
+    session_idle_minutes: int
+    session_absolute_minutes: int
+    mfa_pending_minutes: int
+    mfa_required_roles: tuple[str, ...]
+
+
+def _read_session_settings(env: Mapping[str, str], problems: list[str]) -> _SessionValues:
+    idle = _read_minutes(env, "SESSION_IDLE_MINUTES", DEFAULT_IDLE_MINUTES, 1, 1440, problems)
+    absolute = _read_minutes(
+        env, "SESSION_ABSOLUTE_MINUTES", DEFAULT_ABSOLUTE_MINUTES, 1, 1440, problems
+    )
+    if absolute < idle:
+        problems.append("AG_SESSION_ABSOLUTE_MINUTES: must not be shorter than the idle timeout")
+    pending = _read_minutes(
+        env, "MFA_PENDING_MINUTES", DEFAULT_MFA_PENDING_MINUTES, 1, 60, problems
+    )
+    raw_roles = env.get("AG_MFA_REQUIRED_ROLES")
+    roles: tuple[str, ...] = ("admin",)
+    if raw_roles is not None and raw_roles.strip():
+        roles = tuple(sorted({r.strip() for r in raw_roles.split(",") if r.strip()}))
+        if "admin" not in roles:
+            # security-privacy 3: TOTP is mandatory for Admins; only widening is allowed.
+            problems.append("AG_MFA_REQUIRED_ROLES: must include admin")
+        if not set(roles) <= set(CONSOLE_ROLES):
+            problems.append(f"AG_MFA_REQUIRED_ROLES: only {', '.join(CONSOLE_ROLES)}")
+    return {
+        "session_idle_minutes": idle,
+        "session_absolute_minutes": absolute,
+        "mfa_pending_minutes": pending,
+        "mfa_required_roles": roles,
+    }
+
+
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     """Build settings from ``env`` (default: the process environment) and validate them."""
     src: Mapping[str, str] = os.environ if env is None else env
@@ -136,6 +199,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     jwt_key = _read_secret(src, "JWT_SIGNING_KEY", problems)
 
     _check_database_url(db_url, problems, production)
+    session = _read_session_settings(src, problems)
     if production:
         _check_secret("KEK", kek, problems)
         _check_secret("JWT_SIGNING_KEY", jwt_key, problems)
@@ -151,6 +215,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         kek=SecretStr(kek or _DEV_KEK),
         jwt_signing_key=SecretStr(jwt_key or _DEV_JWT),
         blocking_mode=False,
+        **session,
     )
 
 

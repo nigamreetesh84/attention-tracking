@@ -4,10 +4,18 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
+from ag_shared.i18n import DEFAULT_LOCALE, Translator
+from argon2 import PasswordHasher
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from ag_server.auth.passwords import default_password_hasher
+from ag_server.auth.provider import LocalAuthProvider
+from ag_server.auth.routes import install_auth
+from ag_server.auth.service import AuthPolicy, AuthRuntime, Clock
+from ag_server.crypto import KeyRing, derive_subkey
 from ag_server.db import database_is_up, make_engine
 from ag_server.settings import Settings, load_settings
 
@@ -16,10 +24,24 @@ from ag_server.settings import Settings, load_settings
 PUBLIC_MARKER = {"x-ag-public": True}
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    """Build the app. Settings are validated here, so an unsafe production config never starts."""
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def create_app(
+    settings: Settings | None = None,
+    *,
+    clock: Clock | None = None,
+    password_hasher: PasswordHasher | None = None,
+) -> FastAPI:
+    """Build the app. Settings are validated here, so an unsafe production config never starts.
+
+    `clock` and `password_hasher` are injection points for tests (a fake clock,
+    cheaper argon2 parameters); production uses UTC now and the defaults.
+    """
     cfg = settings if settings is not None else load_settings()
     engine = make_engine(cfg)
+    hasher = password_hasher if password_hasher is not None else default_password_hasher()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -37,6 +59,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = cfg
     app.state.engine = engine
+    app.state.auth = AuthRuntime(
+        policy=AuthPolicy.from_settings(cfg),
+        provider=LocalAuthProvider(hasher),
+        ring=KeyRing.from_settings(cfg),
+        csrf_key=derive_subkey(cfg.kek.get_secret_value(), "csrf"),
+        hasher=hasher,
+        clock=clock if clock is not None else _utc_now,
+    )
+    install_auth(app, Translator(DEFAULT_LOCALE, strict=cfg.env == "test"))
 
     @app.get("/healthz", openapi_extra=PUBLIC_MARKER)
     def healthz() -> dict[str, str]:

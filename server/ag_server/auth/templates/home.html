@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ t("console.auth.product") }}</h1>
+<p>{{ t("console.auth.signed_in_as", name=name) }}</p>
+<form method="post" action="/auth/logout">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit">{{ t("console.auth.logout") }}</button>
+</form>
+{% endblock %}

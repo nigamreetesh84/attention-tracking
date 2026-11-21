@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ t("console.auth.mfa.verify_title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("console.auth.mfa.verify_title") }}</h1>
+<p>{{ t("console.auth.mfa.verify_help") }}</p>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+<form method="post" action="/auth/mfa/verify" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>{{ t("console.auth.mfa.code") }}
+    <input name="code" autocomplete="one-time-code" required maxlength="64" autofocus>
+  </label>
+  <button type="submit">{{ t("console.auth.mfa.verify_submit") }}</button>
+</form>
+<form method="post" action="/auth/logout">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit">{{ t("console.auth.logout") }}</button>
+</form>
+{% endblock %}

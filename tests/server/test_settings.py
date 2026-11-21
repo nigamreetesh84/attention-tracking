@@ -197,3 +197,51 @@ def test_app_role_name_is_configurable_and_validated() -> None:
     for bad in ('x"; DROP TABLE user; --', "Upper", "1abc", "a" * 64, "has space"):
         with pytest.raises(SettingsError, match="AG_DB_APP_ROLE"):
             load_migration_settings({"AG_DB_APP_ROLE": bad})
+
+
+def test_console_session_timeouts_default_to_the_design() -> None:
+    s = load_settings({})
+    assert s.session_idle_minutes == 15
+    assert s.session_absolute_minutes == 480
+    assert s.mfa_pending_minutes == 5
+    assert s.mfa_required_roles == ("admin",)
+
+
+def test_console_session_timeouts_are_configurable() -> None:
+    s = load_settings(
+        {
+            "AG_SESSION_IDLE_MINUTES": "30",
+            "AG_SESSION_ABSOLUTE_MINUTES": "600",
+            "AG_MFA_PENDING_MINUTES": "3",
+            "AG_MFA_REQUIRED_ROLES": "admin, supervisor",
+        }
+    )
+    assert (s.session_idle_minutes, s.session_absolute_minutes, s.mfa_pending_minutes) == (
+        30,
+        600,
+        3,
+    )
+    assert s.mfa_required_roles == ("admin", "supervisor")
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("AG_SESSION_IDLE_MINUTES", "0"),
+        ("AG_SESSION_IDLE_MINUTES", "abc"),
+        ("AG_SESSION_IDLE_MINUTES", "1441"),
+        ("AG_SESSION_ABSOLUTE_MINUTES", "10"),  # shorter than the idle timeout
+        ("AG_SESSION_ABSOLUTE_MINUTES", "2000"),
+        ("AG_MFA_PENDING_MINUTES", "61"),
+    ],
+)
+def test_bad_session_timeouts_are_rejected(name: str, value: str) -> None:
+    with pytest.raises(SettingsError, match=name):
+        load_settings({name: value})
+
+
+def test_mfa_can_never_be_made_optional_for_admins() -> None:
+    with pytest.raises(SettingsError, match="AG_MFA_REQUIRED_ROLES"):
+        load_settings({"AG_MFA_REQUIRED_ROLES": "supervisor"})
+    with pytest.raises(SettingsError, match="AG_MFA_REQUIRED_ROLES"):
+        load_settings({"AG_MFA_REQUIRED_ROLES": "admin,root"})

@@ -57,6 +57,7 @@ include = ["ag_shared*", "ag_workstation*", "ag_server*"]
 [tool.setuptools.package-data]
 "*" = ["py.typed"]
 "ag_shared.i18n" = ["catalogs/*.json"]
+"ag_server.auth" = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

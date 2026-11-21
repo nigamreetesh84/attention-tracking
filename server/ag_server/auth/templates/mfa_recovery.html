@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ t("console.auth.mfa.recovery_title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("console.auth.mfa.recovery_title") }}</h1>
+<p>{{ t("console.auth.mfa.recovery_help") }}</p>
+<ul>
+{% for code in codes %}  <li><code class="recovery">{{ code }}</code></li>
+{% endfor %}</ul>
+<p><a href="/">{{ t("console.auth.mfa.continue") }}</a></p>
+{% endblock %}
