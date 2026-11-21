@@ -938,3 +938,24 @@ def test_property_no_file_while_the_gate_is_closed(steps: list[Step]) -> None:
                         assert len(outcome.image_ids) == len(b.frames)
                         held += len(b.frames)
                     assert len(files(root)) == held
+
+
+def test_engine_config_schedule_without_a_bundle(sessions: Sessions, clock: FakeClock) -> None:
+    # 2.9-pre: the engine child has no bundle (no roster crosses IPC); it reads
+    # the shifts and site timezone from the engine config.
+    config = bundle().engine_config()
+    gate = CaptureGate(sessions=sessions, bundles=None, clock=clock, schedule=lambda: config)
+    clock_at(clock, LUNCH_START + timedelta(minutes=1))
+    sessions.session = session(started_at=LUNCH_START - timedelta(hours=2))
+    assert gate.decide_live().reason is GateReason.ON_BREAK
+    clock.advance(60 * 60)
+    assert gate.decide_live().open
+    no_schedule = CaptureGate(sessions=sessions, bundles=None, clock=clock, schedule=lambda: None)
+    assert no_schedule.decide_live().open
+    broken = CaptureGate(
+        sessions=sessions,
+        bundles=None,
+        clock=clock,
+        schedule=lambda: 1 / 0,  # type: ignore[arg-type,return-value]  # a failing source
+    )
+    assert broken.decide_live().reason is GateReason.ERROR

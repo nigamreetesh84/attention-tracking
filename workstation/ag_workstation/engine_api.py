@@ -1,8 +1,10 @@
 """The seam between the detection engine and the rest of the workstation.
 
 Phase 2 code (scan flow, capture gate, service host, sync) depends only on
-these interfaces. The engine runtime (PLAN 1.8) and the evidence ring/burst
-(PLAN 1.9) implement them; until they exist, `ag_workstation.fakes` does.
+these interfaces. The engine runtime (PLAN 1.8) implements them through
+`ag_workstation.engine.adapter.EngineAdapter`, and the evidence burst
+assembly (PLAN 1.9, `evidence.burst`) emits the `EvidenceBurst` defined here;
+`ag_workstation.fakes` implements them for tests and `--dev`.
 Sources: `docs/detection-engine.md` sections 1, 5 (scan decision) and 7
 (evidence capture).
 
@@ -364,6 +366,10 @@ class EvidenceBurst:
     expected_frames: int
     """How many frames the burst should have had; more than `len(frames)`
     when a camera was offline or the ring did not hold a frame."""
+    missing: tuple[str, ...] = ()
+    """Optional labels of the frames that could not be taken, one per missing
+    frame (`key`, `pre`, `post`, `secondary_key:<slot>`); empty when the
+    producer does not name them."""
 
     def __post_init__(self) -> None:
         _check_utc(self.triggered_at, "triggered_at")
@@ -372,6 +378,9 @@ class EvidenceBurst:
             raise ValueError("a frame appears twice in the burst")
         if len(self.frames) > self.expected_frames:
             raise ValueError("more frames than expected")
+        if self.missing and len(self.missing) != self.expected_frames - len(self.frames):
+            raise ValueError("missing labels do not match the missing frame count")
+        object.__setattr__(self, "missing", tuple(self.missing))
         ordered = tuple(sorted(self.frames, key=lambda f: (f.camera_slot, f.offset_ms, f.seq)))
         object.__setattr__(self, "frames", ordered)
 
@@ -387,7 +396,8 @@ class EvidenceBurst:
 
 
 class EvidenceSink(Protocol):
-    """Receives finished bursts (PLAN 1.9). The capture gate (2.5) wraps it."""
+    """Receives finished bursts from the `BurstAssembler` (PLAN 1.9). The
+    capture gate's `GatedEvidenceSink` (2.5) is the production sink."""
 
     def submit(self, burst: EvidenceBurst) -> None:
         """Take a burst. Called on an engine thread: must return quickly.

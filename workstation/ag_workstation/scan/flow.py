@@ -57,10 +57,9 @@ from ag_shared.ids import Uuid7Generator
 from ag_shared.states import AttentionState, ScanOutcome, scan_outcome
 from pydantic import BaseModel
 
-from ag_workstation.auth.sessions import CurrentSession
 from ag_workstation.clock import Clock
 from ag_workstation.consent.decision import GateDecision, GateReason
-from ag_workstation.consent.gate import SessionSource
+from ag_workstation.consent.gate import GateSession, SessionSource
 from ag_workstation.consent.sink import CaptureOutcome
 from ag_workstation.engine_api import (
     SCAN_QUERY_TIMEOUT_S,
@@ -341,14 +340,14 @@ class ScanFlow:
             persisted=persisted or journaled,
         )
 
-    def _current_session(self) -> CurrentSession | None:
+    def _current_session(self) -> GateSession | None:
         try:
             return self._sessions.current()
         except Exception as exc:
             logger.error("session lookup failed (%s); scan is unattributed", type(exc).__name__)
             return None
 
-    def _scan_state(self, session: CurrentSession | None) -> QueryAnswer:
+    def _scan_state(self, session: GateSession | None) -> QueryAnswer:
         if session is None:
             return self._query.unknown(QueryStatus.SKIPPED)
         if self._scheduled_break():
@@ -442,7 +441,7 @@ class ScanFlow:
     # -- warned scans ------------------------------------------------------------
 
     def _warn(
-        self, scan_id: UUID, scanned_at: datetime, state: StationState, session: CurrentSession
+        self, scan_id: UUID, scanned_at: datetime, state: StationState, session: GateSession
     ) -> UUID:
         event_id = self._ids()
         fields: dict[str, object] = {

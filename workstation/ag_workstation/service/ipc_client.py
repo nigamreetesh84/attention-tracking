@@ -21,16 +21,30 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
+from uuid import UUID
 
+from ag_shared.config import EngineConfig
 from ag_shared.health import EngineStatus
 from pydantic import JsonValue
 
 from ag_workstation.clock import Clock
-from ag_workstation.engine_api import SCAN_QUERY_TIMEOUT_S, EngineHealth, StationState
+from ag_workstation.consent.gate import GateSession
+from ag_workstation.consent.sink import CaptureOutcome
+from ag_workstation.engine_api import (
+    SCAN_QUERY_TIMEOUT_S,
+    BurstKind,
+    ConfigApplyResult,
+    EngineHealth,
+    StationState,
+)
 from ag_workstation.service import protocol as p
+from ag_workstation.service.station import BurstStatus
 from ag_workstation.service.transport import IpcConnection, IpcTransport
 
 logger = logging.getLogger(__name__)
+
+CONFIG_TIMEOUT_S: Final = 8.0
+"""`apply_config` may restart capture (up to 5 s); it never runs on the scan path."""
 
 
 class CallStatus(StrEnum):
@@ -93,10 +107,12 @@ class IpcClient:
         clock: Clock,
         *,
         timeout_s: float = SCAN_QUERY_TIMEOUT_S,
+        config_timeout_s: float = CONFIG_TIMEOUT_S,
         timer: Callable[[], float] = time.monotonic,
     ) -> None:
-        if timeout_s <= 0:
-            raise ValueError("timeout_s must be positive")
+        if timeout_s <= 0 or config_timeout_s <= 0:
+            raise ValueError("timeouts must be positive")
+        self.config_timeout_s = config_timeout_s
         self._transport = transport
         self._clock = clock
         self.timeout_s = timeout_s
@@ -146,6 +162,78 @@ class IpcClient:
         """Round trip without touching the engine."""
         return self.call(p.Op.PING).status
 
+    # -- control operations (never on the scan path; see `service.remote`) ---
+
+    def push_session(
+        self, session: GateSession | None, ttl_s: float, *, timeout_s: float | None = None
+    ) -> CallStatus:
+        """Tell the engine child which session is open (ids, start, consent only)."""
+        body = None
+        if session is not None:
+            body = p.SessionMsg(
+                session_id=session.session_id,
+                user_id=session.user_id,
+                started_at=session.started_at,
+                has_consent=bool(session.has_consent),
+            )
+        try:
+            args = p.SetSessionArgs(session=body, ttl_s=ttl_s).model_dump(mode="json")
+        except ValueError:
+            return CallStatus.ERROR
+        return self.call(p.Op.SET_SESSION, args, timeout_s=timeout_s).status
+
+    def apply_config(self, config: EngineConfig) -> ConfigApplyResult:
+        """`EngineConfigTarget.apply_config` over IPC, with `config_timeout_s`.
+
+        Never raises: an unreachable or slow child is a rejection whose reason
+        is the call status (the child may still apply it later)."""
+        args: dict[str, JsonValue] = {"config": config.model_dump(mode="json")}
+        res = self.call(p.Op.APPLY_CONFIG, args, timeout_s=self.config_timeout_s)
+        if res.status is CallStatus.OK and res.result is not None:
+            try:
+                msg = p.ConfigResultMsg.model_validate(res.result)
+                return ConfigApplyResult(msg.accepted, msg.config_version, msg.reason)
+            except ValueError:
+                res = CallResult(CallStatus.ERROR)
+        reason = res.error.value if res.error is not None else res.status.value
+        return ConfigApplyResult(False, config.config_version, reason)
+
+    def send_burst_request(
+        self,
+        event_id: UUID,
+        kind: BurstKind,
+        trigger_ts: float,
+        *,
+        timeout_s: float | None = None,
+    ) -> CallStatus:
+        """Ask the engine child for an evidence burst."""
+        args: dict[str, JsonValue] = {
+            "event_id": str(event_id),
+            "kind": kind.value,
+            "trigger_ts": trigger_ts,
+        }
+        return self.call(p.Op.REQUEST_BURST, args, timeout_s=timeout_s).status
+
+    def burst_outcome(
+        self, event_id: UUID, *, timeout_s: float | None = None
+    ) -> BurstStatus | None:
+        """What happened to a burst; None when the child could not be asked."""
+        res = self.call(p.Op.BURST_OUTCOME, {"event_id": str(event_id)}, timeout_s=timeout_s)
+        if res.status is not CallStatus.OK or res.result is None:
+            return None
+        try:
+            msg = p.BurstOutcomeMsg.model_validate(res.result)
+        except ValueError:
+            return None
+        if msg.status != "done":
+            return BurstStatus(msg.status)
+        if msg.images_withheld is None or msg.gate_reason is None:
+            return None
+        outcome = CaptureOutcome(
+            event_id, msg.image_ids, msg.images_withheld, msg.gate_reason, msg.frames
+        )
+        return BurstStatus("done", outcome)
+
     def _state(self, op: p.Op) -> StateResult:
         res = self.call(op)
         if res.status is CallStatus.OK and res.result is not None:
@@ -160,13 +248,21 @@ class IpcClient:
 
     # -- raw call -----------------------------------------------------------
 
-    def call(self, op: p.Op) -> CallResult:
-        """Send one request and wait for its answer until the deadline. Never raises."""
-        deadline = self._timer() + self.timeout_s
-        if not self._lock.acquire(timeout=self.timeout_s):
+    def call(
+        self,
+        op: p.Op,
+        args: dict[str, JsonValue] | None = None,
+        *,
+        timeout_s: float | None = None,
+    ) -> CallResult:
+        """Send one request and wait for its answer until the deadline
+        (`timeout_s`, default the client's). Never raises."""
+        limit = self.timeout_s if timeout_s is None or timeout_s <= 0 else timeout_s
+        deadline = self._timer() + limit
+        if not self._lock.acquire(timeout=limit):
             return CallResult(CallStatus.TIMEOUT)
         try:
-            return self._call(op, deadline)
+            return self._call(op, args, deadline)
         except _TimeoutError:
             return CallResult(CallStatus.TIMEOUT)
         except (_UnavailableError, OSError, EOFError):
@@ -185,13 +281,17 @@ class IpcClient:
             raise _TimeoutError
         return left
 
-    def _call(self, op: p.Op, deadline: float) -> CallResult:
+    def _call(self, op: p.Op, args: dict[str, JsonValue] | None, deadline: float) -> CallResult:
         if self._closed:
             raise _UnavailableError
-        conn = self._connection(deadline)
         self._next_id = (self._next_id + 1) % 2**53
         request_id = self._next_id
-        conn.send_bytes(p.encode(p.Request(id=request_id, op=op)))
+        try:
+            data = p.encode(p.Request(id=request_id, op=op, args=args))
+        except (ValueError, p.ProtocolError):  # too large or not JSON: never sent
+            return CallResult(CallStatus.ERROR, error=p.ErrorCode.BAD_REQUEST)
+        conn = self._connection(deadline)
+        conn.send_bytes(data)
         while True:
             if not conn.poll(self._remaining(deadline)):
                 raise _TimeoutError

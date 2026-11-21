@@ -18,13 +18,18 @@ from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from typing import Final, Literal, Protocol
 
+from ag_workstation.service.engine_factory import DEFAULT_ENGINE_FACTORY
 from ag_workstation.service.ipc_server import EventPublisher, IpcServer, StateAndHealth
+from ag_workstation.service.station import StationControl
 from ag_workstation.service.transport import IpcTransport
 
 HEARTBEAT_INTERVAL_S: Final = 0.25
 
 EngineFactory = Callable[[EventPublisher], StateAndHealth]
-"""Builds the engine in the child; wires the publisher as its event listener."""
+"""Builds the engine in the child; wires the publisher as its event listener.
+If the result also implements `StationControl` (the real engine's
+`StationChild`), the IPC server serves the control operations too; if it
+has `close()`, the child calls it on the way out."""
 
 
 class _Counter(Protocol):
@@ -54,7 +59,8 @@ def engine_child_main(
     """Child entry point: build, serve, beat. Runs until killed."""
     publisher = EventPublisher()
     engine = resolve_factory(factory_path)(publisher)
-    server = IpcServer(transport, engine)
+    control = engine if isinstance(engine, StationControl) else None
+    server = IpcServer(transport, engine, control=control)
     publisher.bind(server)
     server.start()
     beats = 0
@@ -65,6 +71,10 @@ def engine_child_main(
             sleep(interval_s)
     finally:
         server.stop()
+        close = getattr(engine, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
 
 
 class ProcessChild:
@@ -123,7 +133,11 @@ def _context(method: StartMethod) -> tuple[BaseContext, Callable[..., BaseProces
 
 
 class ProcessLauncher:
-    """A `ChildLauncher` that starts `engine_child_main` in a new process."""
+    """A `ChildLauncher` that starts `engine_child_main` in a new process.
+
+    The service uses `ProcessLauncher.real` (the real engine); tests and
+    development pass a fake's factory path explicitly.
+    """
 
     def __init__(
         self,
@@ -138,6 +152,27 @@ class ProcessLauncher:
         self._transport = transport
         self._interval = heartbeat_interval_s
         self._ctx, self._process_cls = _context(start_method)
+
+    @classmethod
+    def real(
+        cls,
+        transport: IpcTransport,
+        *,
+        heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S,
+        start_method: StartMethod = "spawn",
+    ) -> "ProcessLauncher":
+        """A launcher for the production engine (`DEFAULT_ENGINE_FACTORY`)."""
+        return cls(
+            DEFAULT_ENGINE_FACTORY,
+            transport,
+            heartbeat_interval_s=heartbeat_interval_s,
+            start_method=start_method,
+        )
+
+    @property
+    def factory_path(self) -> str:
+        """The engine factory the child builds."""
+        return self._factory_path
 
     def launch(self) -> ProcessChild:
         """Start a child process."""

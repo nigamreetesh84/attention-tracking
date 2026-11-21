@@ -1,4 +1,5 @@
-"""Engine factories for the service child process (tests, and until PLAN 1.8 lands)."""
+"""A fake engine factory for the service child process (tests and development only;
+the service default is `service.engine_factory.real_engine_factory`)."""
 
 from ag_workstation.clock import SystemClock
 from ag_workstation.engine_api import EngineEventListener

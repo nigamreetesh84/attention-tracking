@@ -24,6 +24,7 @@ from ag_workstation.engine_api import (
     StationStateQuery,
 )
 from ag_workstation.service import protocol as p
+from ag_workstation.service.station import PushedSession, StationControl
 from ag_workstation.service.transport import IpcConnection, IpcListener, IpcTransport
 
 logger = logging.getLogger(__name__)
@@ -54,11 +55,13 @@ class IpcServer:
         transport: IpcTransport,
         engine: StateAndHealth,
         *,
+        control: StationControl | None = None,
         max_clients: int = 16,
         event_backlog: int = EVENT_BACKLOG,
     ) -> None:
         self._transport = transport
         self._engine = engine
+        self._control = control
         self._max_clients = max_clients
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -92,11 +95,64 @@ class IpcServer:
                     return p.ok(request.id, p.EngineHealthMsg.of(self._engine.health()))
                 case p.Op.PING | p.Op.SUBSCRIBE:
                     return p.ok(request.id, {})
+                case _:
+                    return self._dispatch_control(request)
+        except p.ProtocolError:
+            self.bad_requests += 1
+            return p.failed(request.id, p.ErrorCode.BAD_REQUEST)
         except Exception as exc:  # every engine failure becomes an error code
             code = _error_code(exc)
             if code is p.ErrorCode.INTERNAL:
                 logger.warning("IPC %s failed: %s", request.op.value, type(exc).__name__)
             return p.failed(request.id, code)
+
+    def _dispatch_control(self, request: p.Request) -> p.Response:
+        control = self._control
+        if control is None:
+            return p.failed(request.id, p.ErrorCode.UNSUPPORTED)
+        match request.op:
+            case p.Op.SET_SESSION:
+                args = p.parse_args(p.SetSessionArgs, request)
+                s = args.session
+                pushed = (
+                    None
+                    if s is None
+                    else PushedSession(s.session_id, s.user_id, s.started_at, s.has_consent)
+                )
+                control.set_session(pushed, args.ttl_s)
+                return p.ok(request.id, {})
+            case p.Op.APPLY_CONFIG:
+                config = p.parse_args(p.ApplyConfigArgs, request).config
+                result = control.apply_config(config)
+                return p.ok(
+                    request.id,
+                    p.ConfigResultMsg(
+                        accepted=result.accepted,
+                        config_version=result.config_version,
+                        reason=None if result.reason is None else result.reason[:64],
+                    ),
+                )
+            case p.Op.REQUEST_BURST:
+                burst = p.parse_args(p.BurstRequestArgs, request)
+                control.request_burst(burst.event_id, burst.kind, burst.trigger_ts)
+                return p.ok(request.id, {})
+            case p.Op.BURST_OUTCOME:
+                event_id = p.parse_args(p.BurstOutcomeArgs, request).event_id
+                status = control.burst_outcome(event_id)
+                outcome = status.outcome
+                if outcome is None:
+                    return p.ok(request.id, p.BurstOutcomeMsg(status=status.status))
+                return p.ok(
+                    request.id,
+                    p.BurstOutcomeMsg(
+                        status=status.status,
+                        image_ids=outcome.image_ids[:64],
+                        images_withheld=outcome.images_withheld,
+                        gate_reason=outcome.gate_reason,
+                        frames=min(outcome.frames, 64),
+                    ),
+                )
+        return p.failed(request.id, p.ErrorCode.BAD_REQUEST)
 
     # -- lifecycle ----------------------------------------------------------
 

@@ -2,7 +2,7 @@
 
 from ag_workstation.consent.breaks import break_intervals, on_break
 from ag_workstation.consent.decision import GateDecision, GateReason, images_withheld_for
-from ag_workstation.consent.gate import BundleSource, CaptureGate, SessionSource
+from ag_workstation.consent.gate import BundleSource, CaptureGate, GateSession, SessionSource
 from ag_workstation.consent.permit import CapturePermit, PermitError
 from ag_workstation.consent.sink import (
     CaptureOutcome,
@@ -18,6 +18,7 @@ __all__ = [
     "CapturePermit",
     "GateDecision",
     "GateReason",
+    "GateSession",
     "GatedEvidenceSink",
     "PermitError",
     "PermittedBurstStore",

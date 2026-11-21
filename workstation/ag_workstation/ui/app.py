@@ -1,16 +1,28 @@
 """Workstation app entry point: `python -m ag_workstation.ui.app [--dev] [--windowed]`.
 
 `assemble` wires the real scan flow, journal, encrypted queue, session
-manager and PIN login to an engine-side source. The source is the service
-over IPC when `AG_IPC_AUTHKEY` (hex) is set and the service answers; else,
-with `--dev`, the `FakeStationEngine` (with a dev roster: employee ID
-`DEV001`, PIN `1234`); else a source that is always unreachable, so the
-screen runs fail-open with "Monitoring unavailable".
+manager and PIN login to an engine-side source.
 
-Release wiring (DPAPI queue keys, roster from the synced config bundle,
-evidence bursts and config over IPC) belongs to the service and sync tasks;
-here the queue key is per run and evidence requests are dropped unless the
-fake engine is used.
+- Default: the real engine in the service's engine child, over IPC
+  (`AG_IPC_AUTHKEY`, hex). The clients are created whether or not the service
+  answers yet and reconnect on every call, so a service that starts later (or
+  restarts) is picked up; until then the state is Unknown (fail-open). Two
+  clients are used: one for the 150 ms state queries, one for the control
+  operations (session push, PPE config, evidence bursts and their outcomes),
+  so a slow control call never costs a scan its query.
+- `--dev`: the in-process `FakeStationEngine` with a dev roster (employee ID
+  `DEV001`, PIN `1234`).
+- No authkey and no `--dev`: a source that is always unreachable, so the
+  screen runs fail-open with "Monitoring unavailable".
+
+The scan flow, the scan journal and login stay in this process (rule 1: a
+scan is recorded even with the service dead). The capture gate is asked here
+before a burst is requested (closed: nothing is requested) and enforced
+again in the engine child, which writes the frames.
+
+Not yet release wiring: the queue key is per run unless `AG_DATA_KEY` is set,
+and the roster comes from the synced bundle only once the sync client (2.9)
+exists; until then there is no roster without `--dev`.
 """
 
 import argparse
@@ -18,6 +30,7 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -42,6 +55,7 @@ from ag_workstation.auth import (
     StaticRosterSource,
 )
 from ag_workstation.clock import Clock, SystemClock
+from ag_workstation.consent import CaptureGate
 from ag_workstation.engine_api import (
     BurstKind,
     ConfigApplyResult,
@@ -51,10 +65,11 @@ from ag_workstation.engine_api import (
     StationState,
 )
 from ag_workstation.fakes import FakeStationEngine
-from ag_workstation.queue import EventQueue, InMemoryKeyProvider, PayloadCipher
+from ag_workstation.queue import EventQueue, InMemoryKeyProvider, KeyProvider, PayloadCipher
 from ag_workstation.scan import KeyboardWedgeParser, ScanFlow, ScanJournal
 from ag_workstation.service import IpcClient, PipeTransport, default_address
-from ag_workstation.service.ipc_client import CallStatus
+from ag_workstation.service.engine_factory import DATA_DIR_ENV, key_provider_from_env
+from ag_workstation.service.remote import RemoteEvidence, SessionPusher
 from ag_workstation.ui.app_presenter import AppPresenter
 from ag_workstation.ui.backends import SessionManagerBackend
 from ag_workstation.ui.login_presenter import LoginPresenter
@@ -158,19 +173,41 @@ class Assembly:
         self.closers.clear()
 
 
-def _ipc_client(clock: Clock) -> IpcClient | None:
+CONTROL_TIMEOUT_S: Final = 1.0
+"""Deadline of the control calls (session push, burst request and poll)."""
+
+
+def _ipc_client(clock: Clock, *, timeout_s: float | None = None) -> IpcClient | None:
+    """A client for the service's engine child, or None without a valid authkey.
+
+    It does not wait for the service: calls fail fast (Unknown) until it
+    answers and reconnect by themselves."""
     raw = os.environ.get(AUTHKEY_ENV, "")
     if not raw:
         return None
     try:
-        client = IpcClient(PipeTransport(default_address(), bytes.fromhex(raw)), clock)
+        transport = PipeTransport(default_address(), bytes.fromhex(raw))
     except ValueError as exc:
         logger.error("%s is not a valid key: %s", AUTHKEY_ENV, type(exc).__name__)
         return None
-    if client.ping() is CallStatus.OK:
-        return client
-    client.close()
-    return None
+    if timeout_s is None:
+        return IpcClient(transport, clock)
+    return IpcClient(transport, clock, timeout_s=timeout_s)
+
+
+def _push_station_config(control: IpcClient, roster: RosterSource) -> None:
+    """Send the station engine config from the bundle (in the background)."""
+    bundle = roster.current_bundle()
+    if bundle is None:
+        return
+    try:
+        config = bundle.engine_config()
+    except Exception as exc:
+        logger.error("station engine config not built (%s)", type(exc).__name__)
+        return
+    result = control.apply_config(config)
+    if not result.accepted:
+        logger.warning("engine child did not take the station config (%s)", result.reason)
 
 
 def assemble(
@@ -179,20 +216,30 @@ def assemble(
     dev: bool,
     clock: Clock | None = None,
     ipc: IpcClient | None = None,
+    control: IpcClient | None = None,
     roster: RosterSource | None = None,
+    keys: KeyProvider | None = None,
     hasher: PasswordHasher | None = None,
     dev_state: AttentionState = AttentionState.ATTENTIVE,
 ) -> Assembly:
-    """Wire the scan and login screens' presenters (no Qt)."""
+    """Wire the scan and login screens' presenters (no Qt).
+
+    `ipc` answers state queries; `control` (a second client) carries the
+    session push, PPE config and evidence bursts to the engine child."""
     clock = clock or SystemClock()
     data_dir.mkdir(parents=True, exist_ok=True)
     closers: list[Callable[[], None]] = []
     fake: FakeStationEngine | None = None
     engine: IpcClient | FakeStationEngine | UnreachableEngine
     evidence: EvidenceRequester
+    remote: RemoteEvidence | None = None
     if ipc is not None:
         engine, evidence, mode = ipc, DroppedEvidence(), "ipc"
         closers.append(ipc.close)
+        if control is not None:
+            closers.append(control.close)
+            remote = RemoteEvidence(control, monotonic=clock.monotonic)
+            evidence = remote
     elif dev:
         fake = FakeStationEngine(clock)
         fake.set_state(dev_state)
@@ -203,8 +250,11 @@ def assemble(
     hasher = hasher or PasswordHasher()
     if roster is None:
         roster = StaticRosterSource(dev_bundle(hasher.hash(DEV_PIN)) if dev else None)
-    # Per-run key: release keys come from DPAPI through the service (PLAN 2.2).
-    keys = InMemoryKeyProvider(secrets.token_bytes(32))
+    # Shared with the engine child when configured (AG_DATA_KEY / DPAPI);
+    # otherwise a per-run key (the queue is then this run's only).
+    keys = keys or key_provider_from_env(os.environ, data_dir if not dev else None)
+    if keys is None or dev:
+        keys = InMemoryKeyProvider(secrets.token_bytes(32))
     queue = EventQueue.open(data_dir / "queue.db", keys, clock)
     closers.append(queue.close)
     journal = ScanJournal.open(data_dir / "scan.jnl", PayloadCipher(keys))
@@ -220,12 +270,15 @@ def assemble(
         registry=registry,
         roster=roster,
         records=queue,
-        engine=fake if fake is not None else AcceptingConfigTarget(),
+        engine=fake if fake is not None else (control or AcceptingConfigTarget()),
         state=auth_state,
         clock=clock,
     )
     manager.recover()
     closers.append(manager.shutdown)
+    # Asked before a burst is requested (closed: nothing is requested); the
+    # engine child enforces its own gate where the frames are written.
+    gate = CaptureGate(sessions=manager, bundles=roster, clock=clock)
     flow = ScanFlow(
         queue=queue,
         journal=journal,
@@ -233,10 +286,24 @@ def assemble(
         evidence=evidence,
         sessions=manager,
         clock=clock,
+        gate=gate,
     )
     flow.recover_journal()
     closers.append(flow.close)
-    backend = SessionManagerBackend(manager)
+    pusher: SessionPusher | None = None
+    if remote is not None and control is not None:
+        remote.bind(flow.on_capture_outcome)
+        remote.start()
+        closers.append(remote.close)
+        pusher = SessionPusher(control, manager)
+        pusher.start()
+        closers.append(pusher.close)
+        threading.Thread(
+            target=_push_station_config, args=(control, roster), name="push-config", daemon=True
+        ).start()
+    backend = SessionManagerBackend(
+        manager, on_change=pusher.push_now if pusher is not None else None
+    )
 
     scan_runner = ThreadRunner("scan")
     poll_runner = ThreadRunner("poll")
@@ -278,12 +345,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse(argv)
     logging.basicConfig(level=logging.INFO)
     clock = SystemClock()
-    data_dir = args.data_dir or Path(tempfile.mkdtemp(prefix="attentionguard-ui-"))
+    shared = os.environ.get(DATA_DIR_ENV, "").strip()
+    data_dir = (
+        args.data_dir
+        or (Path(shared) if shared and not args.dev else None)
+        or Path(tempfile.mkdtemp(prefix="attentionguard-ui-"))
+    )
     assembly = assemble(
         data_dir=data_dir,
         dev=args.dev,
         clock=clock,
-        ipc=_ipc_client(clock),
+        ipc=None if args.dev else _ipc_client(clock),
+        control=None if args.dev else _ipc_client(clock, timeout_s=CONTROL_TIMEOUT_S),
         dev_state=AttentionState(args.dev_state),
     )
     logger.info("engine source: %s; data in %s", assembly.engine_mode, data_dir)

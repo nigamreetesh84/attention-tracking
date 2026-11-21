@@ -1,5 +1,6 @@
 """Evidence ring buffer and burst capture (in memory only)."""
 
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -9,6 +10,7 @@ from ag_shared.config import CaptureConfig
 from ag_workstation.capture.jpeg import encode_jpeg
 from ag_workstation.capture.types import CaptureError, Frame, Image
 from ag_workstation.engine.fakes import T0
+from ag_workstation.engine_api import BurstKind, FrameRole
 from ag_workstation.evidence import (
     AsyncSink,
     BurstAssembler,
@@ -22,8 +24,11 @@ from ag_workstation.evidence import burst as burst_module
 EVENT = UUID(int=7)
 
 
+SOI = b"\xff\xd8"
+
+
 def fake_jpeg(image: Image, quality: int) -> bytes:
-    return bytes([int(image[0, 0, 0]), quality])
+    return SOI + bytes([int(image[0, 0, 0]), quality])
 
 
 def frame(slot: int, seq: int, ts: float) -> Frame:
@@ -55,7 +60,7 @@ def test_ring_samples_at_the_frame_interval_and_is_bounded() -> None:
     held = ring.frames()
     assert len(held) == ring.capacity == 6
     assert [f.ts for f in held] == [7.0, 7.5, 8.0, 8.5, 9.0, 9.5]
-    assert held[-1].jpeg == bytes([96, 80])  # seq 96, quality 80
+    assert held[-1].jpeg == SOI + bytes([96, 80])  # seq 96, quality 80
 
 
 def test_ring_restarts_when_time_goes_back_and_rejects_other_cameras() -> None:
@@ -75,7 +80,7 @@ def test_station_rings_memory_is_bounded() -> None:
     rings = EvidenceRings((1, 2), CAP, fake_jpeg)
     feed(rings, (1, 2), 0.0, 600.0)
     assert len(rings.snapshot(1)) == 6
-    assert rings.memory_bytes() == 2 * 6 * 2
+    assert rings.memory_bytes() == 2 * 6 * 4
     rings.offer(frame(3, 1, 0.0))  # unknown camera: ignored
     assert rings.snapshot(3) == []
     assert rings.slots == (1, 2)
@@ -97,17 +102,20 @@ def test_scan_burst_selects_key_pre_post_and_secondary_by_timestamp() -> None:
     feed(rings, (1, 2), 10.1, 11.05)
     assert assembler.pending == 0
     (burst,) = sink.bursts
-    roles = [(i.role, i.frame.camera_slot, i.offset_ms) for i in burst.images]
+    roles = [(f.role, f.camera_slot, f.offset_ms) for f in burst.frames]
+    # Ordered by camera, then offset; the secondary's key frame is a key on slot 2.
     assert roles == [
-        ("pre", 1, -1000),
-        ("pre", 1, -500),
-        ("key", 1, 0),
-        ("secondary_key", 2, 0),
-        ("post", 1, 500),
-        ("post", 1, 1000),
+        (FrameRole.PRE, 1, -1000),
+        (FrameRole.PRE, 1, -500),
+        (FrameRole.KEY, 1, 0),
+        (FrameRole.POST, 1, 500),
+        (FrameRole.POST, 1, 1000),
+        (FrameRole.KEY, 2, 0),
     ]
     assert burst.missing == ()
     assert burst.event_id == EVENT
+    assert burst.kind is BurstKind.SCAN_WARNING
+    assert burst.expected_frames == 6 and burst.complete
 
 
 def test_key_frame_is_the_nearest_within_tolerance() -> None:
@@ -117,8 +125,8 @@ def test_key_frame_is_the_nearest_within_tolerance() -> None:
     feed(rings, (1,), 0.0, 10.05)
     assembler.request_scan_burst(EVENT, 10.2, primary_slot=1)
     feed(rings, (1,), 10.1, 12.0)
-    key = next(i for i in sink.bursts[0].images if i.role == "key")
-    assert key.frame.ts == 10.0
+    key = next(f for f in sink.bursts[0].frames if f.role == "key")
+    assert key.seq == 101  # the ring frame at ts 10.0
     assert key.offset_ms == -200
 
 
@@ -133,8 +141,9 @@ def test_missing_frames_are_listed() -> None:
     assert sink.bursts == []
     assembler.poll(2.1)
     (burst,) = sink.bursts
-    assert [i.role for i in burst.images] == ["pre", "key"]
+    assert [f.role for f in burst.frames] == ["pre", "key"]
     assert burst.missing == ("pre", "secondary_key:2", "post", "post")
+    assert burst.missing_frames == 4
 
 
 def test_no_key_frame_at_all() -> None:
@@ -144,7 +153,7 @@ def test_no_key_frame_at_all() -> None:
     assembler.request_scan_burst(EVENT, 5.0, primary_slot=1)
     assembler.flush()
     (burst,) = sink.bursts
-    assert burst.images == ()
+    assert burst.frames == ()
     assert burst.missing == ("key", "pre", "pre", "post", "post")
 
 
@@ -155,7 +164,7 @@ def test_post_frames_already_in_the_ring_complete_at_once() -> None:
     feed(rings, (1,), 0.0, 6.0)
     assembler.request_scan_burst(EVENT, 4.0, primary_slot=1)  # scan handled late
     (burst,) = sink.bursts
-    assert [i.offset_ms for i in burst.images] == [-1000, -500, 0, 500, 1000]
+    assert [f.offset_ms for f in burst.frames] == [-1000, -500, 0, 500, 1000]
 
 
 def test_late_frame_past_the_deadline_delivers() -> None:
@@ -166,7 +175,7 @@ def test_late_frame_past_the_deadline_delivers() -> None:
     assembler.request_scan_burst(EVENT, 2.0, primary_slot=1)
     rings.offer(frame(1, 99, 5.0))  # one frame, long after the deadline
     (burst,) = sink.bursts
-    assert [i.role for i in burst.images].count("post") == 1
+    assert [f.role for f in burst.frames].count(FrameRole.POST) == 1
     assert burst.missing == ("post",)
 
 
@@ -190,8 +199,9 @@ def test_episode_keyframe() -> None:
     assembler.request_keyframe(EVENT, 3.0, primary_slot=1)
     assembler.request_keyframe(UUID(int=8), 60.0, primary_slot=1)
     first, second = sink.bursts
-    assert [(i.role, i.offset_ms) for i in first.images] == [("key", 0)]
-    assert second.images == () and second.missing == ("key",)
+    assert [(f.role, f.offset_ms) for f in first.frames] == [("key", 0)]
+    assert first.kind is BurstKind.EPISODE_KEYFRAME and first.expected_frames == 1
+    assert second.frames == () and second.missing == ("key",)
 
 
 def test_no_pre_or_post_frames_configured() -> None:
@@ -202,7 +212,7 @@ def test_no_pre_or_post_frames_configured() -> None:
     feed(rings, (1,), 0.0, 1.05)
     assembler.request_scan_burst(EVENT, 1.0, primary_slot=1)
     (burst,) = sink.bursts
-    assert [i.role for i in burst.images] == ["key"]
+    assert [f.role for f in burst.frames] == ["key"]
 
 
 def test_nothing_touches_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,7 +243,7 @@ class FailingSink:
         self.fail_first = fail_first
         self.bursts: list[object] = []
 
-    def deliver(self, burst: object) -> None:
+    def submit(self, burst: object) -> None:
         if self.fail_first > 0:
             self.fail_first -= 1
             raise OSError("disk full")
@@ -278,7 +288,7 @@ def test_async_sink_delivers_off_thread_and_never_blocks() -> None:
         def __init__(self) -> None:
             self.bursts: list[object] = []
 
-        def deliver(self, burst: object) -> None:
+        def submit(self, burst: object) -> None:
             threads.append(threading.current_thread().name)
             gate.wait(5)
             if len(self.bursts) == 0 and len(threads) == 1:
@@ -288,9 +298,9 @@ def test_async_sink_delivers_off_thread_and_never_blocks() -> None:
 
     inner = SlowSink()
     sink = AsyncSink(inner, max_queued=2)
-    burst = EvidenceBurst(EVENT, 0.0, ())
+    burst = EvidenceBurst(EVENT, BurstKind.SCAN_WARNING, T0, 0.0, (), 0)
     for _ in range(5):
-        sink.deliver(burst)  # 1 in progress, 2 queued, the rest dropped
+        sink.submit(burst)  # 1 in progress, 2 queued, the rest dropped
     assert sink.dropped >= 2
     gate.set()
     sink.drain()
@@ -298,3 +308,60 @@ def test_async_sink_delivers_off_thread_and_never_blocks() -> None:
     assert threads[0] == "evidence-sink"
     assert sink.delivered == 1
     assert sink.errors == len(threads) - 1
+
+
+# --- 2.9-pre: the assembler emits the workstation-wide burst type ---
+
+
+def test_scan_burst_carries_the_trigger_time() -> None:
+    rings = EvidenceRings((1,), CAP, fake_jpeg)
+    sink = MemorySink()
+    assembler = BurstAssembler(rings, CAP, sink)
+    feed(rings, (1,), 0.0, 6.0)
+    at = T0 + timedelta(minutes=3)
+    assembler.request_scan_burst(EVENT, 4.0, primary_slot=1, triggered_at=at)
+    (burst,) = sink.bursts
+    assert burst.triggered_at == at and burst.trigger_ts == 4.0
+    # Without one it is derived from the frames (captured at T0 here, ts 4.0 = key).
+    assembler.request_keyframe(UUID(int=8), 4.0, primary_slot=1)
+    assert sink.bursts[1].triggered_at == T0
+
+
+def test_frameless_burst_is_dated_from_the_clocks() -> None:
+    rings = EvidenceRings((1,), CAP, fake_jpeg)
+    sink = MemorySink()
+    now = T0 + timedelta(hours=1)
+    assembler = BurstAssembler(rings, CAP, sink, wall_clock=lambda: now, mono_clock=lambda: 50.0)
+    assembler.request_keyframe(EVENT, 48.0, primary_slot=1)
+    assert sink.bursts[0].triggered_at == now - timedelta(seconds=2)
+    assert sink.bursts[0].missing == ("key",)
+
+
+def test_frame_processed_late_but_captured_before_the_scan_is_not_a_post_frame() -> None:
+    rings = EvidenceRings((1,), CAP, fake_jpeg)
+    sink = MemorySink()
+    assembler = BurstAssembler(rings, CAP, sink)
+    feed(rings, (1,), 0.0, 9.05)  # ring ... 8.0, 8.5, 9.0
+    rings.offer(frame(1, 500, 9.0))  # same ts: not sampled
+    assembler.request_scan_burst(EVENT, 9.6, primary_slot=1)  # key 9.0 (600 ms before)
+    rings.offer(frame(1, 501, 9.55))  # captured before the scan, arrives after the request
+    rings.offer(frame(1, 502, 10.1))
+    rings.offer(frame(1, 503, 10.6))
+    (burst,) = sink.bursts
+    posts = [f for f in burst.frames if f.role == FrameRole.POST]
+    assert [f.seq for f in posts] == [502, 503]
+    assert all(f.offset_ms > 0 for f in posts)
+
+
+def test_invalid_frames_are_left_out_and_listed() -> None:
+    def not_jpeg(image: Image, quality: int) -> bytes:
+        return b"PNG"
+
+    rings = EvidenceRings((1,), CAP, not_jpeg)
+    sink = MemorySink()
+    assembler = BurstAssembler(rings, CAP, sink)
+    feed(rings, (1,), 0.0, 3.05)
+    assembler.request_keyframe(EVENT, 3.0, primary_slot=1)
+    (burst,) = sink.bursts
+    assert burst.frames == () and burst.missing == ("key",)
+    assert assembler.dropped_frames == 1

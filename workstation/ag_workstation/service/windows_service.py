@@ -13,7 +13,7 @@ import importlib
 from collections.abc import Callable
 from typing import Any, Final
 
-from ag_workstation.service.host import ServiceHost
+from ag_workstation.service.host import ServiceHost, default_service_host
 
 SERVICE_NAME: Final = "AttentionGuard"
 DISPLAY_NAME: Final = "AttentionGuard monitoring service"
@@ -57,7 +57,11 @@ def make_service_class(host_factory: HostFactory) -> type:
     return AttentionGuardService
 
 
-def main(host_factory: HostFactory, argv: list[str] | None = None) -> None:
+def main(host_factory: HostFactory = default_service_host, argv: list[str] | None = None) -> None:
     """Command-line entry (install / start / stop / remove / debug)."""
     win32serviceutil: Any = importlib.import_module("win32serviceutil")
     win32serviceutil.HandleCommandLine(make_service_class(host_factory), argv=argv)
+
+
+if __name__ == "__main__":  # pragma: no cover - Windows service command line
+    main()

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from ag_shared.health import EngineStatus
+from ag_shared.states import AttentionState
 from ag_workstation.clock import FakeClock, SystemClock
 from ag_workstation.service import (
     RESTART_DEADLINE_S,
@@ -109,6 +110,36 @@ def test_frozen_engine_process_is_replaced(transport: PipeTransport) -> None:
         )
         assert restored < RESTART_DEADLINE_S
         assert supervisor.health().last_error == "hung"
+    finally:
+        host.stop()
+        client.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX socket path; Windows is a manual check")
+def test_real_engine_child_process_is_fail_open_without_hardware(
+    transport: PipeTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 2.9-pre: the default launcher spawns the real engine. Here there is no
+    # camera config, camera, model or data dir: the child must still start,
+    # answer Unknown and report the reason in health, never crash.
+    for name in ("AG_ENGINE_CONFIG", "AG_DATA_DIR", "AG_DATA_KEY", "AG_MODEL_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    launcher = ProcessLauncher.real(transport, heartbeat_interval_s=0.05)
+    supervisor = EngineSupervisor(
+        launcher, SystemClock(), config=SupervisorConfig(poll_interval_s=0.05)
+    )
+    host = ServiceHost(supervisor, tick_s=0.05)
+    client = IpcClient(transport, FakeClock(), timeout_s=1.0)
+    host.start()
+    try:
+        _wait(lambda: client.ping() is CallStatus.OK, limit=30.0)
+        state = client.query_scan_state()
+        assert state.status is CallStatus.OK
+        assert state.state.state is AttentionState.UNKNOWN
+        health = client.query_health().health
+        assert health.last_error == "not_configured"
+        assert not health.monitoring_available
+        assert supervisor.health().restarts == 0
     finally:
         host.stop()
         client.close()

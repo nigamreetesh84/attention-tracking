@@ -16,7 +16,8 @@ from ag_shared.i18n import Translator
 from ag_shared.ids import new_uuid7
 from ag_shared.states import AttentionState
 from ag_workstation.clock import FakeClock
-from ag_workstation.engine_api import EngineHealth, StationState
+from ag_workstation.engine_api import SCAN_QUERY_TIMEOUT_S, EngineHealth, StationState
+from ag_workstation.service.ipc_client import CallStatus
 from ag_workstation.ui import Screen, StatusLevel
 from ag_workstation.ui import app as app_module
 from ag_workstation.ui.app import (
@@ -236,7 +237,12 @@ def test_main_launches_and_closes(
         widget.close()
 
 
-def test_ipc_client_only_with_a_reachable_service(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ipc_client_with_a_valid_key_even_before_the_service_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 2.9-pre: the UI no longer gives up on the service when it is not up yet
+    # (it would then never monitor after a late service start); the client is
+    # created and stays fail-open (Unknown) until the service answers.
     clock = FakeClock()
     monkeypatch.delenv(app_module.AUTHKEY_ENV, raising=False)
     assert app_module._ipc_client(clock) is None
@@ -246,7 +252,17 @@ def test_ipc_client_only_with_a_reachable_service(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         app_module, "default_address", lambda: str(Path(tempfile.mkdtemp()) / "none.sock")
     )
-    assert app_module._ipc_client(clock) is None  # nobody listening
+    client = app_module._ipc_client(clock)  # nobody listening
+    assert client is not None
+    try:
+        assert client.ping() is CallStatus.UNAVAILABLE
+        assert client.scan_state().state is AttentionState.UNKNOWN
+        assert client.timeout_s == SCAN_QUERY_TIMEOUT_S
+    finally:
+        client.close()
+    control = app_module._ipc_client(clock, timeout_s=app_module.CONTROL_TIMEOUT_S)
+    assert control is not None and control.timeout_s == app_module.CONTROL_TIMEOUT_S
+    control.close()
 
 
 def test_assemble_with_ipc_client(tmp_path: Path) -> None:
