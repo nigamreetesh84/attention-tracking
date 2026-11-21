@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 from sqlalchemy import Engine, create_engine, text
@@ -46,6 +46,50 @@ def pg_dsn(pg_admin_dsn: str) -> Iterator[str]:
 @pytest.fixture
 def pg_engine(pg_dsn: str) -> Iterator[Engine]:
     engine = create_engine(pg_dsn)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def pg_database_factory(pg_admin_dsn: str) -> Iterator[Callable[[], str]]:
+    """Factory for extra throwaway databases (migration tests need empty ones).
+
+    Every database it creates is dropped at the end of the session.
+    """
+    admin = create_engine(pg_admin_dsn, isolation_level="AUTOCOMMIT")
+    created: list[str] = []
+
+    def create() -> str:
+        name = f"ag_test_{uuid.uuid4().hex[:12]}"
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{name}"'))
+        created.append(name)
+        return make_url(pg_admin_dsn).set(database=name).render_as_string(hide_password=False)
+
+    try:
+        yield create
+    finally:
+        with admin.connect() as conn:
+            for name in created:
+                conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+@pytest.fixture(scope="session")
+def migrated_dsn(pg_database_factory: Callable[[], str]) -> str:
+    """A throwaway database upgraded to the head migration (shared by read-mostly tests)."""
+    from ag_server.migrations.runner import upgrade
+
+    dsn = pg_database_factory()
+    upgrade(dsn, "head")
+    return dsn
+
+
+@pytest.fixture
+def migrated_engine(migrated_dsn: str) -> Iterator[Engine]:
+    engine = create_engine(migrated_dsn)
     try:
         yield engine
     finally:

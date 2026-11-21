@@ -29,6 +29,22 @@ services:
       retries: 6
     networks: [backend]
 
+  # One-shot schema migration (alembic upgrade head). App and worker start
+  # only after it exits successfully, so they never run against an old schema.
+  migrate:
+    image: attentionguard-server:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["alembic", "-c", "server/alembic.ini", "upgrade", "head"]
+    restart: "no"
+    environment: *app-env
+    secrets: [ag_database_url, ag_kek, ag_jwt_signing_key]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
   app:
     build:
       context: ..
@@ -40,6 +56,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
       interval: 15s
@@ -56,6 +74,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       app:
         condition: service_healthy
     networks: [backend]

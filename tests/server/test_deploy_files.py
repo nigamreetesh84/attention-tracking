@@ -16,8 +16,8 @@ def compose() -> dict[str, Any]:
     return data
 
 
-def test_compose_has_the_four_services() -> None:
-    assert set(compose()["services"]) == {"postgres", "app", "worker", "proxy"}
+def test_compose_has_the_five_services() -> None:
+    assert set(compose()["services"]) == {"postgres", "migrate", "app", "worker", "proxy"}
 
 
 def test_only_the_proxy_publishes_ports() -> None:
@@ -60,3 +60,30 @@ def test_dockerfile_runs_unprivileged() -> None:
     text = (DEPLOY / "Dockerfile").read_text()
     assert "USER " in text
     assert "USER root" not in text
+
+
+def test_migrate_service_runs_alembic_once_before_app_and_worker() -> None:
+    services = compose()["services"]
+    migrate = services["migrate"]
+    assert migrate["image"] == services["app"]["image"]
+    assert migrate["restart"] == "no"
+    assert migrate["command"] == ["alembic", "-c", "server/alembic.ini", "upgrade", "head"]
+    assert migrate["depends_on"]["postgres"]["condition"] == "service_healthy"
+    assert migrate["environment"]["AG_DATABASE_URL_FILE"].startswith("/run/secrets/")
+    assert "ag_database_url" in migrate["secrets"]
+    for name in ("app", "worker"):
+        dep = services[name]["depends_on"]["migrate"]
+        assert dep["condition"] == "service_completed_successfully", name
+
+
+def test_image_ships_the_alembic_config_and_migrations() -> None:
+    text = (DEPLOY / "Dockerfile").read_text()
+    assert "COPY server ./server" in text
+    root = DEPLOY.parent
+    assert (root / "server" / "alembic.ini").is_file()
+    assert (root / "server" / "ag_server" / "migrations" / "env.py").is_file()
+
+
+def test_readme_documents_the_migration_step() -> None:
+    text = (DEPLOY / "README.md").read_text()
+    assert "alembic" in text and "upgrade head" in text and "migrate" in text
