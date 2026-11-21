@@ -430,6 +430,86 @@ def test_consent_follows_the_roster_in_force(clock: FakeClock) -> None:
         assert gate.decide_live().reason is GateReason.NO_SESSION
 
 
+# -- time base: device time on both sides (contract 6 "Clock"; 2.11 fix) ----------
+
+
+class _Offset:
+    def __init__(self, ms: int) -> None:
+        self.ms = ms
+
+    def offset_ms(self) -> int:
+        return self.ms
+
+
+@pytest.mark.parametrize(
+    ("login_offset_ms", "burst_offset_ms", "burst_after_login_s", "opens"),
+    [
+        # The server offset grows by 30 s after login. A burst that began 10 s
+        # before the session would look 20 s *after* it in corrected UTC; it
+        # must stay closed (frames of the previous worker or of nobody).
+        (0, 30_000, -10, False),
+        # The offset shrinks by 30 s: a burst 10 s into the session would look
+        # 20 s before it in corrected UTC; it is the worker's and may open.
+        (30_000, 0, 10, True),
+        (5_000, 5_000, -1, False),
+        (5_000, 5_000, 1, True),
+    ],
+)
+def test_the_gate_compares_session_and_burst_in_device_time(
+    clock: FakeClock,
+    login_offset_ms: int,
+    burst_offset_ms: int,
+    burst_after_login_s: int,
+    opens: bool,
+) -> None:
+    """The UI stamps records with corrected UTC, but what it pushes to the
+    engine child (the session start) and what the child compares it with (the
+    burst's frames) are both device time, so no offset change can open the
+    gate for a burst that started before the session."""
+    from ag_workstation.corrected_time import StampingClock
+    from ag_workstation.service.station import PushedSession, PushedSessions
+
+    roster = StaticRosterSource(bundle(shifts=False))
+    offset = _Offset(login_offset_ms)
+    with AuthStateStore.in_memory() as state:
+        manager = SessionManager(
+            registry=LoginMethodRegistry(),
+            roster=roster,
+            records=_NullRecords(),
+            engine=FakeStationEngine(clock),
+            state=state,
+            clock=clock,
+            utc=StampingClock(clock, offset),
+        )
+        clock.advance(60)
+        manager.handle_assign_worker(
+            AssignWorkerCommand(
+                id=new_uuid7(),
+                assignment_id=new_uuid7(),
+                user_id=W1,
+                valid_until=T0 + timedelta(hours=8),
+            )
+        )
+        login_at = clock.now()
+        clock.advance(30)
+        offset.ms = burst_offset_ms
+        current = manager.current()
+        assert current is not None
+        # What `SessionPusher` sends, as the engine child stores it.
+        pushed = PushedSessions(clock)
+        pushed.set(
+            PushedSession(current.session_id, current.user_id, current.started_at, True), 5.0
+        )
+        child_gate = CaptureGate(sessions=pushed, bundles=None, clock=clock)
+        # A burst whose earliest frame is `burst_after_login_s` from the login.
+        probe = BUILDER.build(new_uuid7(), BurstKind.SCAN_WARNING, login_at)
+        lead = login_at - min(f.captured_at for f in probe.frames)
+        first_frame = login_at + timedelta(seconds=burst_after_login_s)
+        b = BUILDER.build(new_uuid7(), BurstKind.SCAN_WARNING, first_frame + lead)
+        assert min(f.captured_at for f in b.frames) == first_frame
+        assert child_gate.decide(b).open is opens
+
+
 # -- fail-safe -----------------------------------------------------------------
 
 
@@ -834,9 +914,18 @@ def test_store_calls_files_write_only_inside_save_frame() -> None:
     )
 
 
+BINARY_WRITERS = {
+    # module: why it may write bytes to disk (2.R: an explicit, reasoned list)
+    "evidence/files.py": "the encrypted evidence image files (the only image writer)",
+    "queue/keys.py": "DPAPI-wrapped key files (data key, IPC key)",
+    "scan/journal.py": "sealed scan journal lines, os.write on an O_APPEND descriptor",
+}
+"""`sync/sealed_file.py` (bundle, credentials) and `corrected_time.py` write
+ASCII text; they hold no frame bytes (see `test_frame_bytes_stay_on_the_evidence_path`)."""
+
+
 def test_no_other_binary_file_writers() -> None:
-    """Images reach disk only through evidence/files.py; keys are the only other binary file."""
-    allowed = {"evidence/files.py", "queue/keys.py"}
+    """Images reach disk only through evidence/files.py; the other binary writers are listed."""
     found = set()
     for rel, tree in _sources():
         for node in ast.walk(tree):
@@ -846,9 +935,39 @@ def test_no_other_binary_file_writers() -> None:
                 "tofile",
             ):
                 found.add(rel)
+            # os.write takes raw bytes (2.R: the old guard did not see it).
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "write"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+            ):
+                found.add(rel)
             if isinstance(node, ast.Constant) and node.value in ("wb", "ab", "xb", "w+b", "r+b"):
                 found.add(rel)
-    assert found <= allowed, found - allowed
+    assert found <= set(BINARY_WRITERS), found - set(BINARY_WRITERS)
+
+
+FRAME_BYTE_READERS = {
+    "engine_api.py": "defines EvidenceFrame (validation, hash, size)",
+    "evidence/ring.py": "the in-memory ring (size accounting)",
+    "evidence/burst.py": "assembles bursts from ring frames",
+    "evidence/store.py": "writes permitted frames through EncryptedImageFiles",
+    "sync/client.py": "uploads a stored image read back from the store",
+}
+
+
+def test_frame_bytes_stay_on_the_evidence_path() -> None:
+    """2.R: frame bytes (`.jpeg`) are touched only by the listed modules, so no
+    other writer (journal, sealed files, record store) can receive them."""
+    users = {
+        rel
+        for rel, tree in _sources()
+        if not rel.startswith("capture/")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "jpeg"
+    }
+    assert users <= set(FRAME_BYTE_READERS), users - set(FRAME_BYTE_READERS)
 
 
 # -- property: no file appears while the gate is closed ---------------------------
@@ -938,3 +1057,24 @@ def test_property_no_file_while_the_gate_is_closed(steps: list[Step]) -> None:
                         assert len(outcome.image_ids) == len(b.frames)
                         held += len(b.frames)
                     assert len(files(root)) == held
+
+
+def test_engine_config_schedule_without_a_bundle(sessions: Sessions, clock: FakeClock) -> None:
+    # 2.9-pre: the engine child has no bundle (no roster crosses IPC); it reads
+    # the shifts and site timezone from the engine config.
+    config = bundle().engine_config()
+    gate = CaptureGate(sessions=sessions, bundles=None, clock=clock, schedule=lambda: config)
+    clock_at(clock, LUNCH_START + timedelta(minutes=1))
+    sessions.session = session(started_at=LUNCH_START - timedelta(hours=2))
+    assert gate.decide_live().reason is GateReason.ON_BREAK
+    clock.advance(60 * 60)
+    assert gate.decide_live().open
+    no_schedule = CaptureGate(sessions=sessions, bundles=None, clock=clock, schedule=lambda: None)
+    assert no_schedule.decide_live().open
+    broken = CaptureGate(
+        sessions=sessions,
+        bundles=None,
+        clock=clock,
+        schedule=lambda: 1 / 0,  # type: ignore[arg-type,return-value]  # a failing source
+    )
+    assert broken.decide_live().reason is GateReason.ERROR

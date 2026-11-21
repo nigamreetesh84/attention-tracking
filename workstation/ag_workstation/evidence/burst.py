@@ -8,18 +8,33 @@ it from the primary camera, and the key frame of each usable secondary. A
 Post frames do not exist yet when the scan happens, so a burst stays pending
 until they arrive or until their time is clearly past; then it is delivered
 with whatever frames exist and the missing ones listed. Nothing touches disk.
+
+Bursts are the workstation-wide `engine_api.EvidenceBurst` (frame roles,
+SHA-256, `expected_frames`, `missing` labels), delivered to an
+`engine_api.EvidenceSink` through `submit`; in production that sink is the
+consent gate's `GatedEvidenceSink` in front of the `EvidenceStore`.
+Offsets are relative to the trigger (scan time or episode start). A
+secondary camera's key frame has role `key` and its own slot; its missing
+label is `secondary_key:<slot>`.
 """
 
 import logging
 import queue
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from ag_shared.config import CaptureConfig
 
+from ag_workstation.engine_api import (
+    BurstKind,
+    EvidenceBurst,
+    EvidenceFrame,
+    EvidenceSink,
+    FrameRole,
+)
 from ag_workstation.evidence.ring import EvidenceRings, RingFrame
 
 log = logging.getLogger(__name__)
@@ -30,35 +45,18 @@ MAX_PENDING = 32
 KEY_TOLERANCE_FACTOR = 1.5
 """A key frame may be at most this many sample intervals away from the key time."""
 
+_POST_MIN_S = 0.0005
+"""A post frame must be at least this far after the trigger, so its offset in
+whole milliseconds is positive (a frame processed late but captured before
+the scan is not a post frame)."""
+
 
 @dataclass(frozen=True, slots=True)
-class BurstImage:
-    """One selected frame and where it sits in the burst."""
+class _Pick:
+    """One selected ring frame and its place in the burst."""
 
     frame: RingFrame
-    offset_ms: int
-    """Relative to the key time; negative for pre-frames (`evidence_image.offset_ms`)."""
-    role: str
-    """`key`, `pre`, `post` or `secondary_key`."""
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceBurst:
-    """The images of one attention event, ready for the consent gate and store."""
-
-    event_id: UUID
-    key_ts: float
-    images: tuple[BurstImage, ...]
-    missing: tuple[str, ...] = ()
-    """Roles that could not be filled, e.g. `post` or `secondary_key:2`."""
-
-
-class EvidenceSink(Protocol):
-    """Receives finished bursts. Task 2.5 wires the consent-gated store here."""
-
-    def deliver(self, burst: EvidenceBurst) -> None:
-        """Take ownership of `burst`."""
-        ...
+    role: FrameRole
 
 
 class AsyncSink:
@@ -79,7 +77,7 @@ class AsyncSink:
         self._thread = threading.Thread(target=self._run, name="evidence-sink", daemon=True)
         self._thread.start()
 
-    def deliver(self, burst: EvidenceBurst) -> None:
+    def submit(self, burst: EvidenceBurst) -> None:
         """Queue `burst`; never blocks."""
         try:
             self._queue.put_nowait(burst)
@@ -93,7 +91,7 @@ class AsyncSink:
             if burst is None:
                 return
             try:
-                self._inner.deliver(burst)
+                self._inner.submit(burst)
                 self.delivered += 1
             except Exception as exc:
                 self.errors += 1
@@ -117,7 +115,7 @@ class MemorySink:
     def __init__(self) -> None:
         self.bursts: list[EvidenceBurst] = []
 
-    def deliver(self, burst: EvidenceBurst) -> None:
+    def submit(self, burst: EvidenceBurst) -> None:
         """Keep `burst`."""
         self.bursts.append(burst)
 
@@ -126,30 +124,41 @@ class MemorySink:
 class _Pending:
     event_id: UUID
     key_ts: float
+    triggered_at: datetime | None
     primary: int
-    images: list[BurstImage]
+    picks: list[_Pick]
     missing: list[str]
+    expected: int
     post_needed: int
     post_after_ts: float
     deadline_ts: float
-    post: list[BurstImage] = field(default_factory=list)
-
-
-def _offset_ms(frame: RingFrame, key_ts: float) -> int:
-    return round((frame.ts - key_ts) * 1000)
+    post: list[_Pick] = field(default_factory=list)
 
 
 class BurstAssembler:
     """Builds bursts from the rings and delivers them to a sink. Thread-safe."""
 
-    def __init__(self, rings: EvidenceRings, capture: CaptureConfig, sink: EvidenceSink) -> None:
+    def __init__(
+        self,
+        rings: EvidenceRings,
+        capture: CaptureConfig,
+        sink: EvidenceSink,
+        *,
+        wall_clock: Callable[[], datetime] | None = None,
+        mono_clock: Callable[[], float] | None = None,
+    ) -> None:
+        """`wall_clock`/`mono_clock` date a burst none of whose frames exist
+        (so there is no frame to derive the trigger's wall time from)."""
         self._rings = rings
         self._capture = capture
         self._sink = sink
+        self._wall = wall_clock or (lambda: datetime.now(UTC))
+        self._mono = mono_clock
         self._interval = capture.frame_interval_ms / 1000
         self._lock = threading.Lock()
         self._pending: list[_Pending] = []
         self.delivery_errors = 0
+        self.dropped_frames = 0
         rings.subscribe(self._on_frame)
 
     @property
@@ -177,10 +186,14 @@ class BurstAssembler:
         *,
         primary_slot: int,
         secondary_slots: Sequence[int] = (),
+        triggered_at: datetime | None = None,
     ) -> None:
-        """Start the burst of a warned scan at `key_ts` (engine seconds)."""
+        """Start the burst of a warned scan at `key_ts` (engine seconds).
+
+        `triggered_at` is the scan's UTC time; when omitted it is derived
+        from the frames' capture times."""
         cap = self._capture
-        images: list[BurstImage] = []
+        picks: list[_Pick] = []
         missing: list[str] = []
         frames = self._rings.snapshot(primary_slot)
         key = self._key_frame(frames, key_ts)
@@ -188,47 +201,126 @@ class BurstAssembler:
             missing.append("key")
             anchor_ts = key_ts
         else:
-            images.append(BurstImage(key, _offset_ms(key, key_ts), "key"))
+            picks.append(_Pick(key, FrameRole.KEY))
             anchor_ts = key.ts
         before = (
             [f for f in frames if f.ts < anchor_ts - 1e-9][-cap.pre_frames :]
             if cap.pre_frames
             else []
         )
-        images[:0] = [BurstImage(f, _offset_ms(f, key_ts), "pre") for f in before]
+        picks[:0] = [_Pick(f, FrameRole.PRE) for f in before]
         if len(before) < cap.pre_frames:
             missing.extend(["pre"] * (cap.pre_frames - len(before)))
         for slot in secondary_slots:
+            if slot == primary_slot:
+                continue
             sec = self._key_frame(self._rings.snapshot(slot), key_ts)
             if sec is None:
                 missing.append(f"secondary_key:{slot}")
             else:
-                images.append(BurstImage(sec, _offset_ms(sec, key_ts), "secondary_key"))
-        already = [f for f in frames if f.ts > anchor_ts + 1e-9][: cap.post_frames]
+                picks.append(_Pick(sec, FrameRole.KEY))
+        post_after = max(anchor_ts, key_ts + _POST_MIN_S)
+        already = [f for f in frames if f.ts > post_after + 1e-9][: cap.post_frames]
+        expected = cap.pre_frames + 1 + cap.post_frames
+        expected += len({s for s in secondary_slots if s != primary_slot})
         pending = _Pending(
             event_id=event_id,
             key_ts=key_ts,
+            triggered_at=triggered_at,
             primary=primary_slot,
-            images=images,
+            picks=picks,
             missing=missing,
+            expected=expected,
             post_needed=cap.post_frames,
-            post_after_ts=anchor_ts,
+            post_after_ts=post_after,
             deadline_ts=anchor_ts + (cap.post_frames + 1) * self._interval,
-            post=[BurstImage(f, _offset_ms(f, key_ts), "post") for f in already],
+            post=[_Pick(f, FrameRole.POST) for f in already],
         )
         self._submit(pending)
 
-    def request_keyframe(self, event_id: UUID, key_ts: float, *, primary_slot: int) -> None:
+    def request_keyframe(
+        self,
+        event_id: UUID,
+        key_ts: float,
+        *,
+        primary_slot: int,
+        triggered_at: datetime | None = None,
+    ) -> None:
         """One key frame from the primary (Sleeping/Absent episodes)."""
         key = self._key_frame(self._rings.snapshot(primary_slot), key_ts)
-        images = () if key is None else (BurstImage(key, _offset_ms(key, key_ts), "key"),)
-        missing = ("key",) if key is None else ()
-        self._hand_over(EvidenceBurst(event_id, key_ts, images, missing))
+        picks = [] if key is None else [_Pick(key, FrameRole.KEY)]
+        missing = ["key"] if key is None else []
+        try:
+            burst = self._build(
+                event_id, BurstKind.EPISODE_KEYFRAME, key_ts, triggered_at, picks, missing, 1
+            )
+        except Exception as exc:  # a malformed burst loses only its image
+            self.delivery_errors += 1
+            log.error("burst not built (%s)", type(exc).__name__)
+            return
+        self._hand_over(burst)
+
+    def _trigger_time(self, key_ts: float, picks: Sequence[_Pick]) -> datetime:
+        if picks:
+            f = picks[0].frame
+            return f.captured_at - timedelta(seconds=f.ts - key_ts)
+        wall = self._wall()
+        if self._mono is None:
+            return wall
+        return wall - timedelta(seconds=self._mono() - key_ts)
+
+    def _build(
+        self,
+        event_id: UUID,
+        kind: BurstKind,
+        key_ts: float,
+        triggered_at: datetime | None,
+        picks: Sequence[_Pick],
+        missing: list[str],
+        expected: int,
+    ) -> EvidenceBurst:
+        """Turn picks into an `EvidenceBurst`; a frame that fails validation
+        (not a JPEG, offset on the wrong side of the trigger) is left out
+        and listed as missing, never raised."""
+        at = triggered_at if triggered_at is not None else self._trigger_time(key_ts, picks)
+        frames: list[EvidenceFrame] = []
+        seen: set[tuple[int, int]] = set()
+        labels = list(missing)
+        for pick in picks:
+            f = pick.frame
+            ident = (f.camera_slot, f.seq)
+            try:
+                if ident in seen:
+                    raise ValueError("duplicate frame")
+                frames.append(
+                    EvidenceFrame(
+                        camera_slot=f.camera_slot,
+                        captured_at=f.captured_at,
+                        offset_ms=round((f.ts - key_ts) * 1000),
+                        seq=f.seq,
+                        role=pick.role,
+                        jpeg=f.jpeg,
+                    )
+                )
+                seen.add(ident)
+            except ValueError as exc:
+                self.dropped_frames += 1
+                labels.append(pick.role.value)
+                log.warning("burst frame left out (%s)", type(exc).__name__)
+        return EvidenceBurst(
+            event_id=event_id,
+            kind=kind,
+            triggered_at=at,
+            trigger_ts=key_ts,
+            frames=tuple(frames),
+            expected_frames=expected,
+            missing=tuple(labels),
+        )
 
     def _hand_over(self, burst: EvidenceBurst) -> None:
         """Give one burst to the sink; a failure loses only that burst."""
         try:
-            self._sink.deliver(burst)
+            self._sink.submit(burst)
         except Exception as exc:
             self.delivery_errors += 1
             log.error("evidence sink error (%s)", type(exc).__name__)
@@ -250,7 +342,7 @@ class BurstAssembler:
         with self._lock:
             for p in list(self._pending):
                 if frame.camera_slot == p.primary and frame.ts > p.post_after_ts + 1e-9:
-                    p.post.append(BurstImage(frame, _offset_ms(frame, p.key_ts), "post"))
+                    p.post.append(_Pick(frame, FrameRole.POST))
                 if len(p.post) >= p.post_needed or frame.ts > p.deadline_ts:
                     self._pending.remove(p)
                     ready.append(p)
@@ -280,11 +372,19 @@ class BurstAssembler:
         missing = list(p.missing)
         if len(post) < p.post_needed:
             missing.extend(["post"] * (p.post_needed - len(post)))
-        self._hand_over(
-            EvidenceBurst(
-                event_id=p.event_id,
-                key_ts=p.key_ts,
-                images=tuple(p.images) + tuple(post),
-                missing=tuple(missing),
+        burst = None
+        try:
+            burst = self._build(
+                p.event_id,
+                BurstKind.SCAN_WARNING,
+                p.key_ts,
+                p.triggered_at,
+                [*p.picks, *post],
+                missing,
+                p.expected,
             )
-        )
+        except Exception as exc:  # a malformed burst loses only its images
+            self.delivery_errors += 1
+            log.error("burst not built (%s)", type(exc).__name__)
+        if burst is not None:
+            self._hand_over(burst)

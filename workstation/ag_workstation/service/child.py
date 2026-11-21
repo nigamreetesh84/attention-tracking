@@ -5,6 +5,12 @@ Windows). The child builds the engine from a `"module:function"` factory
 path, serves it over IPC, and bumps a shared heartbeat counter from its main
 loop. Killing the process, or freezing it, stops the counter; the supervisor
 notices and relaunches.
+
+The counter also stops while the served engine reports itself not alive
+(`alive()`, the real engine's `StationChild`: its tick thread died or hangs
+while the process and the IPC server live on). The child keeps serving, so
+scans get Unknown at once, and the supervisor restarts it within seconds
+and raises `engine_restart` (scope 4.4; PROGRESS 2.11 fix).
 """
 
 import contextlib
@@ -18,17 +24,36 @@ from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from typing import Final, Literal, Protocol
 
+from ag_workstation.service.engine_factory import DEFAULT_ENGINE_FACTORY
 from ag_workstation.service.ipc_server import EventPublisher, IpcServer, StateAndHealth
+from ag_workstation.service.station import StationControl
 from ag_workstation.service.transport import IpcTransport
 
 HEARTBEAT_INTERVAL_S: Final = 0.25
 
 EngineFactory = Callable[[EventPublisher], StateAndHealth]
-"""Builds the engine in the child; wires the publisher as its event listener."""
+"""Builds the engine in the child; wires the publisher as its event listener.
+If the result also implements `StationControl` (the real engine's
+`StationChild`), the IPC server serves the control operations too; if it
+has `close()`, the child calls it on the way out."""
 
 
 class _Counter(Protocol):
     value: int
+
+
+def beat_allowed(engine: object) -> bool:
+    """Whether the child may beat for `engine`: its `alive()` if it has one.
+
+    Never raises; a failing probe answers True (a probe bug must not put a
+    working child into a restart loop; the engine's health reports it)."""
+    alive = getattr(engine, "alive", None)
+    if not callable(alive):
+        return True
+    try:
+        return alive() is not False
+    except Exception:
+        return True
 
 
 def resolve_factory(path: str) -> EngineFactory:
@@ -49,22 +74,29 @@ def engine_child_main(
     interval_s: float = HEARTBEAT_INTERVAL_S,
     *,
     sleep: Callable[[float], None] = time.sleep,
-    max_beats: int | None = None,
+    max_loops: int | None = None,
 ) -> None:
-    """Child entry point: build, serve, beat. Runs until killed."""
+    """Child entry point: build, serve, beat while the engine is alive. Runs
+    until killed (`max_loops` bounds the loop for tests)."""
     publisher = EventPublisher()
     engine = resolve_factory(factory_path)(publisher)
-    server = IpcServer(transport, engine)
+    control = engine if isinstance(engine, StationControl) else None
+    server = IpcServer(transport, engine, control=control)
     publisher.bind(server)
     server.start()
-    beats = 0
+    loops = 0
     try:
-        while max_beats is None or beats < max_beats:
-            counter.value += 1
-            beats += 1
+        while max_loops is None or loops < max_loops:
+            if beat_allowed(engine):
+                counter.value += 1
+            loops += 1
             sleep(interval_s)
     finally:
         server.stop()
+        close = getattr(engine, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
 
 
 class ProcessChild:
@@ -123,7 +155,11 @@ def _context(method: StartMethod) -> tuple[BaseContext, Callable[..., BaseProces
 
 
 class ProcessLauncher:
-    """A `ChildLauncher` that starts `engine_child_main` in a new process."""
+    """A `ChildLauncher` that starts `engine_child_main` in a new process.
+
+    The service uses `ProcessLauncher.real` (the real engine); tests and
+    development pass a fake's factory path explicitly.
+    """
 
     def __init__(
         self,
@@ -138,6 +174,27 @@ class ProcessLauncher:
         self._transport = transport
         self._interval = heartbeat_interval_s
         self._ctx, self._process_cls = _context(start_method)
+
+    @classmethod
+    def real(
+        cls,
+        transport: IpcTransport,
+        *,
+        heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S,
+        start_method: StartMethod = "spawn",
+    ) -> "ProcessLauncher":
+        """A launcher for the production engine (`DEFAULT_ENGINE_FACTORY`)."""
+        return cls(
+            DEFAULT_ENGINE_FACTORY,
+            transport,
+            heartbeat_interval_s=heartbeat_interval_s,
+            start_method=start_method,
+        )
+
+    @property
+    def factory_path(self) -> str:
+        """The engine factory the child builds."""
+        return self._factory_path
 
     def launch(self) -> ProcessChild:
         """Start a child process."""

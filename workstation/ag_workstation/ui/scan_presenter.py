@@ -226,6 +226,11 @@ class ScanPresenter:
         return prompt
 
     @property
+    def session(self) -> CurrentSession | None:
+        """The worker session open at the last tick."""
+        return self._session
+
+    @property
     def logged_in(self) -> bool:
         """A worker session was open at the last tick."""
         return self._session is not None

@@ -4,6 +4,7 @@ Every message is one small UTF-8 JSON object, framed by the transport and
 validated on both ends. No pickling: a peer can send only data, never code.
 
 Request   {"v": 1, "id": 7, "op": "scan_state"}
+          {"v": 1, "id": 8, "op": "request_burst", "args": {...}}
 Response  {"v": 1, "id": 7, "ok": true, "result": {...}}
           {"v": 1, "id": 7, "ok": false, "error": "engine_unavailable"}
 Event     {"v": 1, "event": "state_changed", "data": {...}}
@@ -15,7 +16,10 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Final, Literal, Self, TypeVar
+from uuid import UUID
 
+from ag_shared.api import ImagesWithheld
+from ag_shared.config import EngineConfig
 from ag_shared.health import CameraStatus, EngineStatus
 from ag_shared.states import AttentionState
 from pydantic import (
@@ -24,13 +28,16 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    StrictBool,
     StrictInt,
     ValidationError,
     field_validator,
     model_validator,
 )
 
+from ag_workstation.consent.decision import GateReason
 from ag_workstation.engine_api import (
+    BurstKind,
     CameraHealthSummary,
     CameraState,
     EngineHealth,
@@ -59,6 +66,14 @@ class Op(StrEnum):
     PING = "ping"
     SUBSCRIBE = "subscribe"
     """Turn this connection into an event channel."""
+    SET_SESSION = "set_session"
+    """UI -> engine child: the open session (or none) for the capture gate."""
+    APPLY_CONFIG = "apply_config"
+    """Apply an `EngineConfig` (station profile or a worker's PPE override)."""
+    REQUEST_BURST = "request_burst"
+    """Start an evidence burst for an event."""
+    BURST_OUTCOME = "burst_outcome"
+    """Poll what happened to a requested burst."""
 
 
 class ErrorCode(StrEnum):
@@ -68,6 +83,8 @@ class ErrorCode(StrEnum):
     TIMEOUT = "engine_timeout"
     ENGINE_ERROR = "engine_error"
     BAD_REQUEST = "bad_request"
+    UNSUPPORTED = "unsupported"
+    """The engine behind this server has no control operations (a fake)."""
     INTERNAL = "internal"
 
 
@@ -102,6 +119,8 @@ class Request(_Msg):
     v: Literal[1] = PROTOCOL_VERSION
     id: MsgId
     op: Op
+    args: dict[str, JsonValue] | None = None
+    """Operation arguments, validated by the op's model on the server."""
 
 
 class Response(_Msg):
@@ -300,6 +319,62 @@ class BucketMsg(_Msg):
         return cls(bucket_start=b.bucket_start, seconds=dict(b.seconds))
 
 
+class SessionMsg(_Msg):
+    """The open session pushed to the engine child: ids, start and consent only."""
+
+    session_id: UUID
+    user_id: UUID
+    started_at: AwareDatetime
+    has_consent: StrictBool
+
+    _check_started = field_validator("started_at")(_utc)
+
+
+class SetSessionArgs(_Msg):
+    """`set_session` arguments; `session` None means nobody is logged in."""
+
+    session: SessionMsg | None
+    ttl_s: Annotated[float, Field(gt=0, le=60, allow_inf_nan=False)]
+
+
+class ApplyConfigArgs(_Msg):
+    """`apply_config` arguments."""
+
+    config: EngineConfig
+
+
+class ConfigResultMsg(_Msg):
+    """`ConfigApplyResult` on the wire."""
+
+    accepted: bool
+    config_version: Annotated[int, Field(ge=0)]
+    reason: Annotated[str, Field(max_length=64)] | None = None
+
+
+class BurstRequestArgs(_Msg):
+    """`request_burst` arguments."""
+
+    event_id: UUID
+    kind: BurstKind
+    trigger_ts: Annotated[float, Field(allow_inf_nan=False)]
+
+
+class BurstOutcomeArgs(_Msg):
+    """`burst_outcome` arguments."""
+
+    event_id: UUID
+
+
+class BurstOutcomeMsg(_Msg):
+    """`burst_outcome` result: pending, done (with the capture outcome), or unknown."""
+
+    status: Literal["pending", "done", "unknown"]
+    image_ids: Annotated[tuple[UUID, ...], Field(max_length=64)] = ()
+    images_withheld: ImagesWithheld | None = None
+    gate_reason: GateReason | None = None
+    frames: Annotated[int, Field(ge=0, le=64)] = 0
+
+
 def _dump(model: BaseModel) -> dict[str, JsonValue]:
     data: dict[str, JsonValue] = model.model_dump(mode="json")
     return data
@@ -324,6 +399,14 @@ def _decode(kind: type[_M], data: bytes) -> _M:
     except (ValidationError, ValueError) as exc:
         # The validation text may echo peer data; keep only the type.
         raise ProtocolError(f"malformed {kind.__name__.lower()}") from exc
+
+
+def parse_args(kind: type[_M], request: Request) -> _M:
+    """Validate a request's `args` against the op's model."""
+    try:
+        return kind.model_validate(request.args or {})
+    except (ValidationError, ValueError) as exc:
+        raise ProtocolError(f"malformed {request.op.value} arguments") from exc
 
 
 def decode_request(data: bytes) -> Request:

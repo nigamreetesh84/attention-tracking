@@ -57,10 +57,9 @@ from ag_shared.ids import Uuid7Generator
 from ag_shared.states import AttentionState, ScanOutcome, scan_outcome
 from pydantic import BaseModel
 
-from ag_workstation.auth.sessions import CurrentSession
 from ag_workstation.clock import Clock
 from ag_workstation.consent.decision import GateDecision, GateReason
-from ag_workstation.consent.gate import SessionSource
+from ag_workstation.consent.gate import GateSession, SessionSource
 from ag_workstation.consent.sink import CaptureOutcome
 from ag_workstation.engine_api import (
     SCAN_QUERY_TIMEOUT_S,
@@ -72,7 +71,7 @@ from ag_workstation.engine_api import (
 )
 from ag_workstation.scan.escalation import EscalationConfig, EscalationCounter
 from ag_workstation.scan.input import MAX_BARCODE_CHARS
-from ag_workstation.scan.journal import ItemQueue, JournalRecovery, ScanJournal
+from ag_workstation.scan.journal import ItemQueue, Journal, JournalRecovery
 from ag_workstation.scan.messages import ScanMessageKey
 from ag_workstation.scan.query import BoundedStateQuery, QueryAnswer, QueryStatus
 
@@ -92,6 +91,8 @@ class HealthFlag(StrEnum):
     """The write-ahead intent or an emergency record could not be journaled."""
     RECORD_LOST = "record_lost"
     """Neither the queue nor the journal took a record."""
+    JOURNAL_UNENCRYPTED = "journal_unencrypted"
+    """A journal line was written in the clear (no key, or sealing failed)."""
 
 
 class Cancellable(Protocol):
@@ -185,6 +186,7 @@ class ScanFlowHealth:
     engine_query_failures: int
     journal_backlog: int
     pending_events: int
+    unencrypted_journal_writes: int = 0
 
 
 @dataclass
@@ -212,7 +214,7 @@ class ScanFlow:
         self,
         *,
         queue: ItemQueue,
-        journal: ScanJournal,
+        journal: Journal,
         engine: StationStateQuery,
         evidence: EvidenceRequester,
         sessions: SessionSource,
@@ -341,14 +343,14 @@ class ScanFlow:
             persisted=persisted or journaled,
         )
 
-    def _current_session(self) -> CurrentSession | None:
+    def _current_session(self) -> GateSession | None:
         try:
             return self._sessions.current()
         except Exception as exc:
             logger.error("session lookup failed (%s); scan is unattributed", type(exc).__name__)
             return None
 
-    def _scan_state(self, session: CurrentSession | None) -> QueryAnswer:
+    def _scan_state(self, session: GateSession | None) -> QueryAnswer:
         if session is None:
             return self._query.unknown(QueryStatus.SKIPPED)
         if self._scheduled_break():
@@ -389,7 +391,10 @@ class ScanFlow:
         item_type: str = EventType.SCAN,
     ) -> bool:
         try:
+            before = self._journal.unencrypted_writes
             write(record_id, item_type, occurred_at, payload)
+            if self._journal.unencrypted_writes > before:
+                self._flag(HealthFlag.JOURNAL_UNENCRYPTED)
             return True
         except Exception as exc:
             logger.error("scan journal write failed: %s", type(exc).__name__)
@@ -442,7 +447,7 @@ class ScanFlow:
     # -- warned scans ------------------------------------------------------------
 
     def _warn(
-        self, scan_id: UUID, scanned_at: datetime, state: StationState, session: CurrentSession
+        self, scan_id: UUID, scanned_at: datetime, state: StationState, session: GateSession
     ) -> UUID:
         event_id = self._ids()
         fields: dict[str, object] = {
@@ -558,13 +563,15 @@ class ScanFlow:
 
     # -- service hooks -------------------------------------------------------------
 
-    def recover_journal(self) -> JournalRecovery:
-        """Move journaled records to the queue (service start, housekeeping)."""
-        return self._journal.recover(self._queue)
+    def recover_journal(self, *, min_age_s: float = 0.0) -> JournalRecovery:
+        """Move journaled records to the queue (app start; `PeriodicJournalRecovery`
+        with `min_age_s` while scanning)."""
+        return self._journal.recover(self._queue, min_age_s=min_age_s)
 
     def health(self) -> ScanFlowHealth:
         """Counters since start."""
         backlog = self._journal.backlog
+        clear = self._journal.unencrypted_writes
         with self._lock:
             return ScanFlowHealth(
                 scans=self._scans,
@@ -574,6 +581,7 @@ class ScanFlow:
                 engine_query_failures=self._engine_failures,
                 journal_backlog=backlog,
                 pending_events=len(self._pending),
+                unencrypted_journal_writes=clear,
             )
 
     def close(self) -> None:

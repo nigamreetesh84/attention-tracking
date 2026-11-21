@@ -1,5 +1,6 @@
 """Scan journal: write-ahead intents, emergency items, recovery and compaction (PLAN 2.6)."""
 
+import time
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from ag_shared.states import AttentionState, ScanOutcome
 from ag_workstation.clock import FakeClock
 from ag_workstation.queue import EventQueue, InMemoryKeyProvider, PayloadCipher
 from ag_workstation.scan import ScanJournal
+from ag_workstation.scan.journal import JournalFallbackWriter, PeriodicJournalRecovery
 from pydantic import BaseModel, JsonValue
 
 KEY = bytes(range(32))
@@ -233,3 +235,150 @@ def test_compaction_failure_is_harmless(
     monkeypatch.setattr("os.ftruncate", no_truncate)
     j.commit(scan_id)
     assert j.backlog == 0
+
+
+# -- 2.R: plaintext is bounded, recovery can run while scanning ---------------------
+
+
+def test_clear_line_is_erased_as_soon_as_nothing_is_pending(
+    path: Path, ids: Uuid7Generator
+) -> None:
+    """2.R M2: a line written in the clear must not outlive its commit (old code
+    kept it until the file reached `compact_bytes`, 64 KiB by default)."""
+    j = ScanJournal.open(path, _BrokenCipher(InMemoryKeyProvider(KEY)))
+    scan_id = ids()
+    j.write_intent(scan_id, EventType.SCAN, T0, _scan())
+    assert SENTINEL.encode() in path.read_bytes()
+    j.commit(scan_id)
+    assert path.stat().st_size == 0
+    j.close()
+
+
+def test_clear_journal_is_erased_after_recovery_on_the_next_start(
+    path: Path, ids: Uuid7Generator, queue: EventQueue
+) -> None:
+    """2.R C1/M2: the no-key journal is drained into the sealed queue at the next
+    start and then emptied, whatever its size."""
+    clear = ScanJournal.open(path)
+    scan_id = ids()
+    clear.write_item(scan_id, EventType.SCAN, T0, _scan(AttentionState.DROWSY))
+    clear.close()
+    reopened = ScanJournal.open(path)
+    assert reopened.recover(queue).enqueued == 1
+    assert path.stat().st_size == 0
+    assert _queued(queue)[scan_id]["state_at_scan"] == "drowsy"
+    reopened.close()
+
+
+def test_sealed_journal_keeps_the_size_rule(
+    path: Path, cipher: PayloadCipher, ids: Uuid7Generator
+) -> None:
+    j = ScanJournal.open(path, cipher)
+    scan_id = ids()
+    j.write_intent(scan_id, EventType.SCAN, T0, _scan())
+    j.commit(scan_id)
+    assert path.stat().st_size > 0  # sealed lines: compacted at compact_bytes only
+    assert j.unencrypted_writes == 0
+    j.close()
+
+
+def test_recover_skips_entries_younger_than_min_age(
+    path: Path, cipher: PayloadCipher, ids: Uuid7Generator, queue: EventQueue
+) -> None:
+    """2.R M1: periodic recovery must not take an intent whose scan is still
+    being decided (its final item would then be refused as already queued)."""
+    now = [100.0]
+    j = ScanJournal.open(path, cipher, monotonic=lambda: now[0])
+    scan_id = ids()
+    j.write_intent(scan_id, EventType.SCAN, T0, _scan())
+    now[0] += 1.0
+    assert j.recover(queue, min_age_s=5.0).enqueued == 0
+    assert j.backlog == 1
+    now[0] += 5.0
+    assert j.recover(queue, min_age_s=5.0).enqueued == 1
+    assert j.backlog == 0
+    j.close()
+
+
+def test_entries_loaded_from_disk_are_old_enough(
+    path: Path, cipher: PayloadCipher, ids: Uuid7Generator, queue: EventQueue
+) -> None:
+    j = ScanJournal.open(path, cipher)
+    j.write_intent(ids(), EventType.SCAN, T0, _scan())
+    j.close()
+    reopened = ScanJournal.open(path, cipher, monotonic=lambda: 0.0)
+    assert reopened.recover(queue, min_age_s=3600.0).enqueued == 1
+    reopened.close()
+
+
+def test_fallback_writer_journals_what_the_queue_refuses(
+    path: Path, cipher: PayloadCipher, ids: Uuid7Generator, queue: EventQueue
+) -> None:
+    """2.R H6: session records get the scans' journal fallback, so a queue
+    failure cannot orphan the scans of a session on the server."""
+    j = ScanJournal.open(path, cipher)
+    broken = JournalFallbackWriter(_BrokenQueue(OSError("db locked")), j)
+    rid = ids()
+    broken.enqueue(EventType.SESSION_START, {"user_id": None}, T0, record_id=rid)
+    no_id = broken.enqueue(EventType.SESSION_END, {"x": 1}, T0)
+    assert isinstance(no_id, UUID)
+    assert {e.id for e in j.pending()} == {rid, no_id}
+    assert all(e.final for e in j.pending())
+    assert j.recover(queue).enqueued == 2
+    assert set(_queued(queue)) == {rid, no_id}
+    j.close()
+
+
+def test_fallback_writer_passes_through_and_does_not_journal_duplicates(
+    path: Path, cipher: PayloadCipher, ids: Uuid7Generator, queue: EventQueue
+) -> None:
+    j = ScanJournal.open(path, cipher)
+    writer = JournalFallbackWriter(queue, j)
+    rid = ids()
+    writer.enqueue(EventType.SCAN, _scan(), T0, record_id=rid)
+    with pytest.raises(ValueError, match="already queued"):
+        writer.enqueue(EventType.SCAN, _scan(), T0, record_id=rid)
+    assert j.backlog == 0
+    j.close()
+
+
+def test_fallback_writer_raises_when_the_journal_fails_too(path: Path, ids: Uuid7Generator) -> None:
+    j = ScanJournal.open(path)
+    j.close()
+    writer = JournalFallbackWriter(_BrokenQueue(OSError("db locked")), j)
+    with pytest.raises(OSError, match="db locked"):
+        writer.enqueue(EventType.SESSION_START, {}, T0, record_id=ids())
+
+
+def test_periodic_recovery_drains_the_journal(
+    path: Path, cipher: PayloadCipher, ids: Uuid7Generator, queue: EventQueue
+) -> None:
+    """2.R M1: the journal is drained while the app runs, not only at start."""
+    now = [0.0]
+    j = ScanJournal.open(path, cipher, monotonic=lambda: now[0])
+    j.write_item(ids(), EventType.SCAN, T0, _scan(AttentionState.DROWSY))
+    loop = PeriodicJournalRecovery(j, queue, interval_s=0.01, min_age_s=2.0)
+    loop.run_once()  # too young to take
+    assert j.backlog == 1
+    now[0] = 10.0
+    loop.start()
+    try:
+        end = time.monotonic() + 2.0
+        while j.backlog and time.monotonic() < end:
+            time.sleep(0.01)
+    finally:
+        loop.close()
+    assert j.backlog == 0
+    assert len(_queued(queue)) == 1
+    j.close()
+
+
+def test_periodic_recovery_survives_errors(path: Path, cipher: PayloadCipher) -> None:
+    class Exploding:
+        backlog = 1
+
+        def recover(self, queue: object, *, min_age_s: float = 0.0) -> object:
+            raise RuntimeError("boom")
+
+    loop = PeriodicJournalRecovery(Exploding(), _BrokenQueue(OSError()), interval_s=0.01)  # type: ignore[arg-type]  # duck-typed journal
+    assert loop.run_once() is None

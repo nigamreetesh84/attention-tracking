@@ -1,4 +1,4 @@
-"""PySide6 views for the scan and login screens (the only Qt module besides `app`).
+"""PySide6 views for the scan, login and "My record" screens (the only Qt module besides `app`).
 
 The views hold no logic: a `QTimer` calls `AppPresenter.tick()` and the view
 renders the returned view model. Key presses anywhere in the window are
@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QStackedWidget,
@@ -29,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from ag_workstation.ui.app_presenter import AppPresenter, AppViewModel, Screen
 from ag_workstation.ui.login_presenter import LoginField, LoginViewModel, MessageKind
+from ag_workstation.ui.record_presenter import DisputeReason, RecordViewModel
 from ag_workstation.ui.scan_presenter import BannerKind, ScanViewModel, StatusLevel
 
 logger = logging.getLogger(__name__)
@@ -184,7 +187,10 @@ class ScanScreen(QWidget):
         self.worker = QLabel()
         self.login_button = _no_focus(QPushButton(translate("ui.login_button")))
         self.logout_button = _no_focus(QPushButton(translate("ui.logout_button")))
+        self.record_button = _no_focus(QPushButton(translate("ui.record_button")))
+        self.record_button.setVisible(False)
         self.login_button.clicked.connect(presenter.show_login)
+        self.record_button.clicked.connect(presenter.show_record)
         self.logout_button.clicked.connect(presenter.logout)
         for label in (self.status, self.banner, self.unavailable, self.message, self.last_item):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -203,6 +209,7 @@ class ScanScreen(QWidget):
         top.addStretch(1)
         top.addWidget(self.monitoring)
         top.addWidget(self.live_view)
+        top.addWidget(self.record_button)
         top.addWidget(self.login_button)
         top.addWidget(self.logout_button)
         layout = QVBoxLayout(self)
@@ -233,6 +240,10 @@ class ScanScreen(QWidget):
         self.worker.setText(vm.worker_text)
         self.login_button.setVisible(not vm.logged_in)
         self.logout_button.setVisible(vm.logged_in)
+
+    def show_record_action(self, available: bool) -> None:
+        """Show "My record" for a logged-in worker when the station keeps a record."""
+        self.record_button.setVisible(available)
 
 
 class LoginScreen(QWidget):
@@ -282,8 +293,162 @@ class LoginScreen(QWidget):
         self.keypad.show_model(vm)
 
 
+_ID_ROLE: Final = Qt.ItemDataRole.UserRole
+
+
+class RecordScreen(QWidget):
+    """The worker's shifts, the selected shift's events and the dispute panel.
+
+    Lists are rebuilt only when their rows change, with signals blocked, so a
+    rebuild never feeds a selection back into the presenter."""
+
+    def __init__(self, presenter: AppPresenter, translate: TranslateFn) -> None:
+        super().__init__()
+        self._presenter = presenter
+        self.title = QLabel(translate("ui.record.title"))
+        self.title.setStyleSheet("font-size: 32px; font-weight: bold;")
+        self.worker = QLabel()
+        self.scope = QLabel()
+        self.scope.setWordWrap(True)
+        self.message = QLabel()
+        self.message.setWordWrap(True)
+        self.empty = QLabel()
+        self.empty.setStyleSheet("font-size: 22px;")
+        self.shifts_label = QLabel(translate("ui.record.shifts"))
+        self.events_label = QLabel(translate("ui.record.events"))
+        self.shifts = QListWidget()
+        self.events = QListWidget()
+        for widget in (self.shifts, self.events):
+            widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            widget.setStyleSheet("font-size: 20px;")
+            widget.setWordWrap(True)
+        self.shifts.itemClicked.connect(self._shift_clicked)
+        self.events.itemClicked.connect(self._event_clicked)
+        self.dispute_button = _no_focus(QPushButton(translate("ui.record.dispute_button")))
+        self.refresh_button = _no_focus(QPushButton(translate("ui.record.refresh")))
+        self.back = _no_focus(QPushButton(translate("ui.record.back")))
+        self.dispute_button.clicked.connect(lambda: self._record_call("start_dispute"))
+        self.refresh_button.clicked.connect(lambda: self._record_call("refresh"))
+        self.back.clicked.connect(presenter.close_record)
+
+        self.dispute_panel = QWidget()
+        self.dispute_title = QLabel(translate("ui.record.dispute.title"))
+        self.dispute_title.setStyleSheet("font-size: 24px; font-weight: bold;")
+        self.reason_buttons: dict[DisputeReason, QPushButton] = {}
+        panel = QVBoxLayout(self.dispute_panel)
+        panel.addWidget(self.dispute_title)
+        for reason in DisputeReason:
+            button = _no_focus(QPushButton(translate(reason.key)))
+            button.setCheckable(True)
+            button.setMinimumHeight(56)
+            button.clicked.connect(self._reason(reason))
+            self.reason_buttons[reason] = button
+            panel.addWidget(button)
+        self.submit = _no_focus(QPushButton(translate("ui.record.dispute.submit")))
+        self.cancel = _no_focus(QPushButton(translate("ui.record.dispute.cancel")))
+        self.submit.clicked.connect(lambda: self._record_call("submit_dispute"))
+        self.cancel.clicked.connect(lambda: self._record_call("cancel_dispute"))
+        actions = QHBoxLayout()
+        actions.addWidget(self.cancel)
+        actions.addWidget(self.submit)
+        panel.addLayout(actions)
+        self.dispute_panel.setVisible(False)
+
+        top = QHBoxLayout()
+        top.addWidget(self.title)
+        top.addStretch(1)
+        top.addWidget(self.worker)
+        lists = QHBoxLayout()
+        left = QVBoxLayout()
+        left.addWidget(self.shifts_label)
+        left.addWidget(self.shifts, 1)
+        right = QVBoxLayout()
+        right.addWidget(self.events_label)
+        right.addWidget(self.events, 1)
+        right.addWidget(self.dispute_button)
+        lists.addLayout(left, 1)
+        lists.addLayout(right, 2)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.back)
+        bottom.addStretch(1)
+        bottom.addWidget(self.refresh_button)
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addWidget(self.scope)
+        layout.addWidget(self.message)
+        layout.addWidget(self.empty)
+        layout.addLayout(lists, 1)
+        layout.addWidget(self.dispute_panel)
+        layout.addLayout(bottom)
+        self._shift_rows: tuple[tuple[str, str], ...] = ()
+        self._event_rows: tuple[str, ...] = ()
+
+    def _record_call(self, name: str) -> None:
+        record = self._presenter.record
+        if record is not None:
+            getattr(record, name)()
+
+    def _reason(self, reason: DisputeReason) -> Callable[[], None]:
+        def choose() -> None:
+            if self._presenter.record is not None:
+                self._presenter.record.choose_reason(reason)
+
+        return choose
+
+    def _shift_clicked(self, item: QListWidgetItem) -> None:
+        if self._presenter.record is not None:
+            self._presenter.record.select_session(item.data(_ID_ROLE))
+
+    def _event_clicked(self, item: QListWidgetItem) -> None:
+        if self._presenter.record is not None:
+            self._presenter.record.select_event(item.data(_ID_ROLE))
+
+    def show_model(self, vm: RecordViewModel | None) -> None:
+        """Show `vm` (None: nothing)."""
+        if vm is None:
+            return
+        self.worker.setText(vm.worker_text)
+        self.scope.setText(vm.scope_text)
+        self.message.setStyleSheet(f"font-size: 22px; color: {_MESSAGE_COLOURS[vm.message_kind]};")
+        _set_text(self.message, vm.message_text)
+        _set_text(self.empty, vm.empty_text)
+        shift_rows = tuple((row.title_text, row.counts_text) for row in vm.sessions)
+        self.shifts.blockSignals(True)
+        if shift_rows != self._shift_rows:
+            self._shift_rows = shift_rows
+            self.shifts.clear()
+            for row in vm.sessions:
+                item = QListWidgetItem(f"{row.title_text}\n{row.counts_text}")
+                item.setData(_ID_ROLE, row.session_id)
+                self.shifts.addItem(item)
+        for index, row in enumerate(vm.sessions):
+            self.shifts.item(index).setSelected(row.selected)
+        self.shifts.blockSignals(False)
+        event_rows = tuple(row.text for row in vm.events)
+        self.events.blockSignals(True)
+        if event_rows != self._event_rows:
+            self._event_rows = event_rows
+            self.events.clear()
+            for event in vm.events:
+                item = QListWidgetItem(event.text)
+                item.setData(_ID_ROLE, event.event_id)
+                self.events.addItem(item)
+        for index, event in enumerate(vm.events):
+            self.events.item(index).setSelected(event.selected)
+        self.events.blockSignals(False)
+        self.dispute_button.setEnabled(vm.can_dispute and not vm.dispute_open)
+        self.dispute_panel.setVisible(vm.dispute_open)
+        chosen = {row.reason for row in vm.reasons if row.selected}
+        for reason, button in self.reason_buttons.items():
+            button.setChecked(reason in chosen)
+            button.setEnabled(not vm.busy)
+        self.submit.setEnabled(vm.can_submit)
+        self.cancel.setEnabled(not vm.busy)
+        self.back.setEnabled(not vm.busy)
+
+
 class MainWindow(QMainWindow):
-    """The full-screen workstation window: scan screen and login screen."""
+    """The full-screen workstation window: scan, login and "My record" screens."""
 
     def __init__(
         self,
@@ -299,9 +464,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(translate("ui.window_title"))
         self.scan_screen = ScanScreen(presenter, translate)
         self.login_screen = LoginScreen(presenter, translate)
+        self.record_screen = RecordScreen(presenter, translate)
         self.stack = QStackedWidget()
         self.stack.addWidget(self.scan_screen)
         self.stack.addWidget(self.login_screen)
+        self.stack.addWidget(self.record_screen)
         self.setCentralWidget(self.stack)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._last: AppViewModel | None = None
@@ -339,8 +506,14 @@ class MainWindow(QMainWindow):
     def show_model(self, vm: AppViewModel) -> None:
         """Show `vm`, and play the warning sound for each new warned scan."""
         self.scan_screen.show_model(vm.scan)
+        self.scan_screen.show_record_action(vm.record_available)
         self.login_screen.show_model(vm.login)
-        target = self.scan_screen if vm.screen is Screen.SCAN else self.login_screen
+        self.record_screen.show_model(vm.record)
+        target: QWidget = {
+            Screen.SCAN: self.scan_screen,
+            Screen.LOGIN: self.login_screen,
+            Screen.RECORD: self.record_screen,
+        }[vm.screen]
         if self.stack.currentWidget() is not target:
             self.stack.setCurrentWidget(target)
         if vm.scan.sound_token != self._sound_token:

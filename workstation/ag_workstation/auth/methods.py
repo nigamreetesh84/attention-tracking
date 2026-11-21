@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
 from typing import Protocol
+from uuid import UUID
 
 from ag_shared.api import RosterEntry, SessionMethod
 
@@ -58,7 +59,11 @@ class AuthResult:
     user: RosterEntry | None = None
     """Set only on success."""
     subject: str | None = None
-    """The normalized identifier the attempt was for (e.g. employee ID), for audit."""
+    """The normalized identifier the attempt was for (e.g. employee ID), for the
+    local lockout only. It is whatever was typed (an unknown ID may be a PIN
+    typed into the wrong field), so it never leaves the station."""
+    subject_user_id: UUID | None = None
+    """The roster user the identifier named, if any: what the audit sends (2.R)."""
     retry_after: timedelta | None = None
     """Set when locked."""
     attempts_remaining: int | None = None

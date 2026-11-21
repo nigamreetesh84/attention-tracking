@@ -32,11 +32,13 @@ it is closed. Decision recorded in the 2.5 summary.
 
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from typing import Protocol
+from uuid import UUID
 
 from ag_shared.api import ConfigBundle
+from ag_shared.config import EngineConfig
 
-from ag_workstation.auth.sessions import CurrentSession
 from ag_workstation.clock import Clock
 from ag_workstation.consent.breaks import on_break
 from ag_workstation.consent.decision import GateDecision, GateReason
@@ -46,10 +48,35 @@ from ag_workstation.engine_api import EvidenceBurst
 logger = logging.getLogger(__name__)
 
 
+class GateSession(Protocol):
+    """What the gate reads of a session. `auth.CurrentSession` has it; so has
+    the session the UI pushes to the engine child (`service.station`)."""
+
+    @property
+    def session_id(self) -> UUID:
+        """The session id."""
+        ...
+
+    @property
+    def user_id(self) -> UUID:
+        """The worker's user id (no name, no employee ID)."""
+        ...
+
+    @property
+    def started_at(self) -> datetime:
+        """UTC start of the session."""
+        ...
+
+    @property
+    def has_consent(self) -> bool:
+        """Current consent from the roster in force."""
+        ...
+
+
 class SessionSource(Protocol):
     """The open session with consent from the roster in force (`SessionManager`)."""
 
-    def current(self) -> CurrentSession | None:
+    def current(self) -> GateSession | None:
         """The open session, or None."""
         ...
 
@@ -69,17 +96,22 @@ class CaptureGate:
         self,
         *,
         sessions: SessionSource,
-        bundles: BundleSource,
+        bundles: BundleSource | None,
         clock: Clock,
         engine_on_break: Callable[[], bool] | None = None,
+        schedule: Callable[[], EngineConfig | None] | None = None,
     ) -> None:
         """`engine_on_break` reports the engine's On Break state; it must
         answer from memory (for example the last state the service saw),
-        because the gate runs on the engine thread that delivers bursts."""
+        because the gate runs on the engine thread that delivers bursts.
+        `schedule` gives the shifts and site timezone from the engine config
+        when no bundle is available (the engine child holds only the engine
+        config, never the roster)."""
         self._sessions = sessions
         self._bundles = bundles
         self._clock = clock
         self._engine_on_break = engine_on_break
+        self._schedule = schedule
 
     def decide(self, burst: EvidenceBurst | None = None) -> GateDecision:
         """Decide now, for `burst` (its frames) or for a frame taken now (None)."""
@@ -119,9 +151,14 @@ class CaptureGate:
             return GateDecision(GateReason.NO_CONSENT, now)
         if self._engine_on_break is not None and self._engine_on_break():
             return GateDecision(GateReason.ON_BREAK, now)
-        bundle = self._bundles.current_bundle()
-        if bundle is not None and on_break(
-            bundle.shifts, bundle.site.timezone, min(start, now), now
-        ):
-            return GateDecision(GateReason.ON_BREAK, now)
+        bundle = self._bundles.current_bundle() if self._bundles is not None else None
+        if bundle is not None:
+            if on_break(bundle.shifts, bundle.site.timezone, min(start, now), now):
+                return GateDecision(GateReason.ON_BREAK, now)
+        elif self._schedule is not None:
+            config = self._schedule()
+            if config is not None and on_break(
+                config.shifts, config.timezone, min(start, now), now
+            ):
+                return GateDecision(GateReason.ON_BREAK, now)
         return GateDecision(GateReason.OPEN, now, session_id=session.session_id)

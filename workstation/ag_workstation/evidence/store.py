@@ -299,6 +299,7 @@ class EvidenceStore:
         disk_free: Callable[[Path], int],
         min_free_mb: int,
         alert_min_interval: timedelta,
+        stamp: Callable[[datetime], datetime] | None = None,
     ) -> None:
         """Use `EvidenceStore.open`."""
         self._root = root
@@ -311,6 +312,7 @@ class EvidenceStore:
         self._disk_free = disk_free
         self._reserve = min_free_mb * MIB
         self._alert_min_interval = alert_min_interval
+        self._stamp = stamp
         self._ids = Uuid7Generator(now=clock.now)
         self._lock = threading.RLock()
         self._closed = False
@@ -328,8 +330,13 @@ class EvidenceStore:
         disk_free: Callable[[Path], int] = _free_bytes,
         min_free_mb: int = DEFAULT_MIN_FREE_MB,
         alert_min_interval: timedelta = DEFAULT_ALERT_MIN_INTERVAL,
+        stamp: Callable[[datetime], datetime] | None = None,
     ) -> Self:
         """Open (creating if needed) the store under `root` and repair it after a crash.
+
+        `stamp` turns a frame's device capture time into the corrected UTC
+        stored and uploaded as `captured_at` (contract 6, "Clock"); None keeps
+        it. The capture gate has decided on device time before this point.
 
         Recovery: temporary files are deleted, files no index row holds are
         deleted, and rows whose file is missing are marked corrupt.
@@ -355,6 +362,7 @@ class EvidenceStore:
                 disk_free=disk_free,
                 min_free_mb=min_free_mb,
                 alert_min_interval=alert_min_interval,
+                stamp=stamp,
             )
             store._init_schema()
             store._recover()
@@ -603,13 +611,14 @@ class EvidenceStore:
             logger.warning("evidence store full: frame of event %s not saved", event_id)
             return None, room
         digest = hashlib.sha256(frame.jpeg).hexdigest()
+        captured_at = self._captured_at(frame.captured_at)
         ad = image_associated_data(
             image_id,
             event_id,
             frame.camera_slot,
             frame.seq,
             frame.offset_ms,
-            frame.captured_at,
+            captured_at,
             digest,
         )
         try:
@@ -630,7 +639,7 @@ class EvidenceStore:
                         frame.camera_slot,
                         frame.seq,
                         frame.offset_ms,
-                        frame.captured_at.astimezone(UTC).isoformat(),
+                        captured_at.astimezone(UTC).isoformat(),
                         digest,
                         frame.size_bytes,
                         stored,
@@ -642,6 +651,16 @@ class EvidenceStore:
             self._files.delete(image_id)
             return None, room
         return image_id, room
+
+    def _captured_at(self, device_time: datetime) -> datetime:
+        if self._stamp is None:
+            return device_time
+        try:
+            return self._stamp(device_time)
+        except Exception as exc:
+            # Fail-open: the device time is still a valid capture time.
+            logger.error("capture time not corrected (%s)", type(exc).__name__)
+            return device_time
 
     def _unlink(self, room: _Room) -> None:
         # After the commit: a crash in between leaves an orphan file that

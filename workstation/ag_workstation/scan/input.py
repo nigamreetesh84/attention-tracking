@@ -31,6 +31,8 @@ BarcodeHandler = Callable[[str], None]
 
 MAX_BARCODE_CHARS: Final = 4096
 """The `scan.barcode` wire limit (contract 4.3)."""
+SHORT_CODE_CHARS: Final = 3
+"""Codes shorter than this are counted as `short_codes` (2.R, open item 5)."""
 
 
 class ScannerInput(Protocol):
@@ -73,7 +75,14 @@ class WedgeConfig:
     """Longest gap between two keystrokes of one scan. Scanners send a
     character every 1-20 ms; people rarely type faster than 80 ms per key."""
     min_length: int = 1
+    """Shorter codes are dropped. Default 1 (2.R decision, open item 5): very
+    fast typing ending in Enter can register as a 1-2 character code, but a
+    real short code must never be rejected (rule 1), and the parser cannot
+    tell the two apart. Shorter codes are recorded and counted
+    (`short_codes`); a site whose barcodes all have a known minimum length
+    may raise this once a per-site setting exists (contract proposal)."""
     max_length: int = MAX_BARCODE_CHARS
+    short_code_chars: int = SHORT_CODE_CHARS
 
     def __post_init__(self) -> None:
         if not self.terminators:
@@ -82,6 +91,8 @@ class WedgeConfig:
             raise ValueError("max_inter_key_s must be positive")
         if not 1 <= self.min_length <= self.max_length <= MAX_BARCODE_CHARS:
             raise ValueError(f"need 1 <= min_length <= max_length <= {MAX_BARCODE_CHARS}")
+        if self.short_code_chars < 1:
+            raise ValueError("short_code_chars must be at least 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +104,8 @@ class WedgeStats:
     """Input discarded because a gap was too long (a person typing)."""
     rejected_short: int
     rejected_overflow: int
+    short_codes: int = 0
+    """Accepted codes shorter than `short_code_chars` (possible keyboard mashing)."""
 
 
 def _is_control(char: str) -> bool:
@@ -121,6 +134,7 @@ class KeyboardWedgeParser:
         self._rejected_slow = 0
         self._rejected_short = 0
         self._rejected_overflow = 0
+        self._short_codes = 0
 
     # -- ScannerInput ----------------------------------------------------
 
@@ -157,7 +171,11 @@ class KeyboardWedgeParser:
         """Counters since start."""
         with self._lock:
             return WedgeStats(
-                self._accepted, self._rejected_slow, self._rejected_short, self._rejected_overflow
+                self._accepted,
+                self._rejected_slow,
+                self._rejected_short,
+                self._rejected_overflow,
+                self._short_codes,
             )
 
     def feed(self, text: str) -> list[str]:
@@ -219,6 +237,8 @@ class KeyboardWedgeParser:
         elif len(self._buffer) >= self._config.min_length:
             code = "".join(self._buffer)
             self._accepted += 1
+            if len(code) < self._config.short_code_chars:
+                self._short_codes += 1
         elif self._pending_keys:
             self._rejected_short += 1
         # An empty terminator (the LF of CR LF) is ignored silently.

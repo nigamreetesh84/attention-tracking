@@ -61,6 +61,7 @@ from ag_workstation.auth import (
     text,
 )
 from ag_workstation.clock import FakeClock
+from ag_workstation.corrected_time import StampingClock
 from ag_workstation.engine_api import ConfigApplyResult
 from ag_workstation.fakes.engine import FakeStationEngine
 from ag_workstation.queue import EventQueue, InMemoryKeyProvider
@@ -302,8 +303,14 @@ def test_wrong_pin_is_a_generic_failure(rig: AuthRig) -> None:
     assert result.attempts_remaining == 4
     assert rig.manager.current() is None
     assert rig.records.of_type(EventType.SESSION_START) == []
+    # 2.R H5: the roster user id of a known worker, never the typed text.
     assert _alerts(rig) == [
-        {"event": "worker_login_failed", "method": PIN_METHOD_NAME, "employee_id": "emp001"}
+        {
+            "event": "worker_login_failed",
+            "method": PIN_METHOD_NAME,
+            "user_id": str(W1),
+            "known_worker": True,
+        }
     ]
 
 
@@ -1071,3 +1078,104 @@ def test_explicit_end_cause(rig: AuthRig) -> None:
     _login(rig, "EMP001", "1234")
     assert rig.manager.end(EndCause.SHIFT_END) is True
     assert _ends(rig)[0].end_reason is SessionEndReason.SHIFT_END
+
+
+# -- time bases (contract 6 "Clock"; 2.11 fix) ---------------------------------------
+
+
+class _Offset:
+    """A settable server offset (what `SharedClockOffset` reads from the file)."""
+
+    def __init__(self, ms: int = 0) -> None:
+        self.ms = ms
+
+    def offset_ms(self) -> int:
+        return self.ms
+
+
+def _corrected_rig(clock: FakeClock, state: AuthStateStore, offset: _Offset) -> AuthRig:
+    rig = build_rig(clock, state)
+    rig.manager = SessionManager(
+        registry=rig.registry,
+        roster=rig.roster,
+        records=rig.records,
+        engine=rig.engine,
+        state=state,
+        clock=clock,
+        utc=StampingClock(clock, offset),
+    )
+    return rig
+
+
+def test_session_records_carry_corrected_utc_and_the_session_keeps_device_time(
+    clock: FakeClock, state: AuthStateStore
+) -> None:
+    """Records are stamped with server-corrected UTC; `started_at` (pushed to
+    the engine child's capture gate) stays in device time, the gate's base."""
+    offset = _Offset(5000)
+    rig = _corrected_rig(clock, state, offset)
+    session = _login(rig, "EMP001", "1234").session
+    assert session is not None
+    assert session.started_at == clock.now()  # device time
+    (start,) = rig.records.of_type(EventType.SESSION_START)
+    assert start.occurred_at == clock.now() + timedelta(seconds=5)
+    row = state.get_open_session()
+    assert row is not None and row.started_at == clock.now()
+    offset.ms = -2000
+    clock.advance(10)
+    rig.manager.logout()
+    (end,) = rig.records.of_type(EventType.SESSION_END)
+    assert end.occurred_at == clock.now() - timedelta(seconds=2)
+
+
+def test_assignment_expiry_is_judged_on_server_time(
+    clock: FakeClock, state: AuthStateStore
+) -> None:
+    """`valid_until` is a server time: the PC clock 5 s behind must not keep
+    an assignment open 5 s too long."""
+    rig = _corrected_rig(clock, state, _Offset(5000))
+    command = _assign(minutes=30, assignment=None)
+    assert rig.manager.handle_assign_worker(command) is CommandOutcome.STARTED
+    rig.clock.advance(30 * 60 - 5)  # device time is 5 s short of valid_until
+    rig.manager.tick()
+    assert rig.manager.current() is None
+    (end,) = rig.records.of_type(EventType.SESSION_END)
+    assert end.occurred_at == command.valid_until
+    # Already expired on server time: refused at arrival.
+    late = _assign(minutes=30, assignment=None)
+    assert rig.manager.handle_assign_worker(late) is CommandOutcome.EXPIRED
+
+
+# -- 2.R H5: the failed-login audit never carries what was typed -------------------
+
+
+@pytest.mark.parametrize("typed", ["482913", "4829", "GHOST9"])
+def test_failed_login_audit_for_an_unknown_id_carries_no_typed_text(
+    rig: AuthRig, typed: str
+) -> None:
+    """A PIN typed into the employee-ID field must not reach the server audit log."""
+    for _ in range(5):
+        _login(rig, typed, "0000")
+    alerts = _alerts(rig)
+    assert [a["event"] for a in alerts] == ["worker_login_failed"] * 4 + ["worker_login_locked"]
+    for alert in alerts:
+        assert alert == {
+            "event": alert["event"],
+            "method": PIN_METHOD_NAME,
+            "user_id": None,
+            "known_worker": False,
+        }
+    for rec in rig.records.of_type(EventType.LOCAL_ALERT):
+        assert typed.casefold() not in rec.payload.model_dump_json().casefold()
+
+
+def test_failed_login_audit_for_an_inactive_worker_names_the_account(rig: AuthRig) -> None:
+    _login(rig, "EMP003", "9999")
+    assert _alerts(rig) == [
+        {
+            "event": "worker_login_failed",
+            "method": PIN_METHOD_NAME,
+            "user_id": str(W3),
+            "known_worker": True,
+        }
+    ]

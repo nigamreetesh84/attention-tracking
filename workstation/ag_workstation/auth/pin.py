@@ -117,16 +117,21 @@ class PinLoginMethod:
             return AuthResult(AuthOutcome.SUCCESS, user=entry, subject=subject)
 
         failure = self._throttle.record_failure(subject)
+        named = entry.user_id if entry is not None else None
         if failure.locked_until is not None:
             logger.info("login locked on this station after repeated failures")
             return AuthResult(
                 AuthOutcome.LOCKED,
                 subject=subject,
+                subject_user_id=named,
                 retry_after=failure.locked_until - self._clock.now(),
                 newly_locked=True,
             )
         return AuthResult(
-            AuthOutcome.FAILED, subject=subject, attempts_remaining=failure.attempts_remaining
+            AuthOutcome.FAILED,
+            subject=subject,
+            subject_user_id=named,
+            attempts_remaining=failure.attempts_remaining,
         )
 
     @staticmethod

@@ -160,3 +160,16 @@ def test_burst_orders_frames_and_counts_missing() -> None:
         EvidenceBurst(EVENT, BurstKind.SCAN_WARNING, T0, 0.0, (_frame(), _frame()), 2)
     with pytest.raises(ValueError, match="more frames"):
         EvidenceBurst(EVENT, BurstKind.EPISODE_KEYFRAME, T0, 0.0, frames, 1)
+
+
+def test_burst_missing_labels_match_the_missing_count() -> None:
+    # 2.9-pre: the single burst type also carries the assembler's labels.
+    key = (_frame(1, 0, 2),)
+    burst = EvidenceBurst(
+        EVENT, BurstKind.SCAN_WARNING, T0, 1.0, key, 3, missing=("pre", "secondary_key:2")
+    )
+    assert burst.missing == ("pre", "secondary_key:2")
+    assert burst.missing_frames == 2
+    with pytest.raises(ValueError, match="missing labels"):
+        EvidenceBurst(EVENT, BurstKind.SCAN_WARNING, T0, 1.0, key, 3, missing=("pre",))
+    assert EvidenceBurst(EVENT, BurstKind.SCAN_WARNING, T0, 1.0, key, 3).missing == ()

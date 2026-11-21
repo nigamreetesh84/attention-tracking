@@ -481,6 +481,32 @@ class Engine:
         """The station state as of the last tick."""
         return self._status
 
+    @property
+    def running(self) -> bool:
+        """Whether the engine was started and not stopped."""
+        return self._running
+
+    def is_current(self) -> bool:
+        """Running, with a tick no older than `unknown_seconds` (lock-free).
+
+        `status()` is only meaningful as a current state while this holds."""
+        last = self._last_tick
+        if not self._running or last is None:
+            return False
+        try:
+            age = self._clock.monotonic() - last
+            return age <= self._pipeline.thresholds.unknown_seconds
+        except Exception:
+            return False
+
+    def tick_age(self) -> float | None:
+        """Seconds since the last successful tick; None before the first one
+        or while stopped (lock-free, for liveness checks)."""
+        last = self._last_tick
+        if not self._running or last is None:
+            return None
+        return self._clock.monotonic() - last
+
     def open_episode(self) -> Episode | None:
         """The episode in progress (for scan warnings to reference).
 
