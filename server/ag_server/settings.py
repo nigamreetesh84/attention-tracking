@@ -10,6 +10,7 @@ never its value.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal, cast
@@ -34,6 +35,11 @@ PLACEHOLDER_MARKERS: Final[tuple[str, ...]] = (
     "todo",
 )
 MIN_SECRET_LENGTH: Final = 32
+
+# The login role the app and worker use. Migrations (run as the schema owner)
+# grant it DML on ordinary tables and only INSERT/SELECT on audit_log.
+DEFAULT_APP_ROLE: Final = "attentionguard_app"
+_ROLE_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 
 _DEV_DATABASE_URL: Final = "postgresql+psycopg://attentionguard@localhost:5432/attentionguard"
 _DEV_KEK: Final = "dev-insecure-kek-do-not-use-in-production"
@@ -87,23 +93,25 @@ def _check_secret(name: str, value: str | None, problems: list[str]) -> None:
         problems.append(f"AG_{name}: shorter than {MIN_SECRET_LENGTH} characters")
 
 
-def _check_database_url(url: str | None, problems: list[str], production: bool) -> None:
+def _check_database_url(
+    url: str | None, problems: list[str], production: bool, name: str = "DATABASE_URL"
+) -> None:
     if url is None:
         if production:
-            problems.append("AG_DATABASE_URL: missing")
+            problems.append(f"AG_{name}: missing")
         return
     try:
         parsed = make_url(url)
     except ArgumentError:
-        problems.append("AG_DATABASE_URL: not a valid database URL")
+        problems.append(f"AG_{name}: not a valid database URL")
         return
     if not parsed.drivername.startswith("postgresql"):
-        problems.append("AG_DATABASE_URL: must be a PostgreSQL URL")
+        problems.append(f"AG_{name}: must be a PostgreSQL URL")
     elif production:
         if not parsed.password:
-            problems.append("AG_DATABASE_URL: production needs a database password")
+            problems.append(f"AG_{name}: production needs a database password")
         elif _is_placeholder(parsed.password):
-            problems.append("AG_DATABASE_URL: database password looks like a placeholder")
+            problems.append(f"AG_{name}: database password looks like a placeholder")
 
 
 def _parse_bool(value: str) -> bool:
@@ -143,4 +151,67 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         kek=SecretStr(kek or _DEV_KEK),
         jwt_signing_key=SecretStr(jwt_key or _DEV_JWT),
         blocking_mode=False,
+    )
+
+
+class MigrationSettings(BaseModel):
+    """What the one-shot migrate step needs: the owner DSN and the app role name.
+
+    Deliberately not `Settings`: the migrate container gets no KEK or JWT key.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    env: Env = "development"
+    database_url: SecretStr
+    app_role: str = DEFAULT_APP_ROLE
+
+
+def app_role_name(env: Mapping[str, str] | None = None) -> str:
+    """The app role from ``AG_DB_APP_ROLE`` (default `attentionguard_app`), validated.
+
+    The name is interpolated into GRANT statements (identifiers cannot be bound
+    parameters), so only lower-case unquoted PostgreSQL identifiers are allowed.
+    """
+    src: Mapping[str, str] = os.environ if env is None else env
+    role = src.get("AG_DB_APP_ROLE") or DEFAULT_APP_ROLE
+    if not _ROLE_NAME.fullmatch(role):
+        raise SettingsError(
+            "AG_DB_APP_ROLE: must be a lower-case identifier (a-z, 0-9, _; at most 63)"
+        )
+    return role
+
+
+def load_migration_settings(env: Mapping[str, str] | None = None) -> MigrationSettings:
+    """Settings for running migrations as the schema-owner role.
+
+    ``AG_MIGRATE_DATABASE_URL`` (or ``_FILE``) is the owner DSN. Outside
+    production it falls back to ``AG_DATABASE_URL`` and then the development
+    default, so a single-role developer database keeps working.
+    """
+    src: Mapping[str, str] = os.environ if env is None else env
+    problems: list[str] = []
+
+    mode = src.get("AG_ENV") or "development"
+    if mode not in ENVS:
+        raise SettingsError(f"AG_ENV: must be one of {', '.join(ENVS)}")
+    production = mode == "production"
+
+    url = _read_secret(src, "MIGRATE_DATABASE_URL", problems)
+    _check_database_url(url, problems, production, name="MIGRATE_DATABASE_URL")
+    if url is None and not production:
+        url = _read_secret(src, "DATABASE_URL", problems)
+        _check_database_url(url, problems, production)
+    try:
+        role = app_role_name(src)
+    except SettingsError as exc:
+        problems.append(str(exc))
+        role = DEFAULT_APP_ROLE
+
+    if problems:
+        raise SettingsError("; ".join(problems))
+    return MigrationSettings(
+        env=cast(Env, mode),
+        database_url=SecretStr(url or _DEV_DATABASE_URL),
+        app_role=role,
     )

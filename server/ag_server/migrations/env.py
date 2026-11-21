@@ -1,9 +1,13 @@
 """Alembic environment.
 
 Database URL, in order: a connection passed in `config.attributes["connection"]`
-(tests and the runner), `config.attributes["url"]`, then the server settings
-(`AG_DATABASE_URL` / `AG_DATABASE_URL_FILE`), so the migrate container uses
-the same Docker secret as the app. The URL is never logged.
+(tests and the runner), `config.attributes["url"]`, then the migration
+settings: `AG_MIGRATE_DATABASE_URL` / `_FILE`, the schema-owner DSN (task 3.3;
+outside production it falls back to `AG_DATABASE_URL`). The URL is never logged.
+
+The application role that migrations grant privileges to is
+`config.attributes["app_role"]`, else `AG_DB_APP_ROLE`, else
+`attentionguard_app` (see `ag_server.migrations.grants`).
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from alembic import context
 from sqlalchemy import Connection, create_engine, pool
 
 from ag_server.models import Base
-from ag_server.settings import load_settings
+from ag_server.settings import app_role_name, load_migration_settings
 
 config = context.config
 if config.config_file_name is not None and config.attributes.get("configure_logging", True):
@@ -27,7 +31,11 @@ def _url() -> str:
     url = config.attributes.get("url")
     if isinstance(url, str):
         return url
-    return load_settings().database_url.get_secret_value()
+    return load_migration_settings().database_url.get_secret_value()
+
+
+if not isinstance(config.attributes.get("app_role"), str):
+    config.attributes["app_role"] = app_role_name()
 
 
 def _configure(connection: Connection) -> None:

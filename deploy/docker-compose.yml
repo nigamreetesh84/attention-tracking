@@ -19,9 +19,12 @@ services:
       POSTGRES_DB: attentionguard
       POSTGRES_USER: attentionguard
       POSTGRES_PASSWORD_FILE: /run/secrets/ag_db_password
-    secrets: [ag_db_password]
+    # ag_db_password: the schema owner (bootstrap role). ag_app_db_password:
+    # the limited app role that initdb/10-app-role.sql creates on first start.
+    secrets: [ag_db_password, ag_app_db_password]
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U attentionguard -d attentionguard"]
       interval: 10s
@@ -31,6 +34,8 @@ services:
 
   # One-shot schema migration (alembic upgrade head). App and worker start
   # only after it exits successfully, so they never run against an old schema.
+  # It connects as the schema owner and grants the app role its privileges
+  # (INSERT/SELECT only on audit_log); it never sees the KEK or JWT key.
   migrate:
     image: attentionguard-server:latest
     build:
@@ -38,8 +43,11 @@ services:
       dockerfile: deploy/Dockerfile
     command: ["alembic", "-c", "server/alembic.ini", "upgrade", "head"]
     restart: "no"
-    environment: *app-env
-    secrets: [ag_database_url, ag_kek, ag_jwt_signing_key]
+    environment:
+      AG_ENV: production
+      AG_MIGRATE_DATABASE_URL_FILE: /run/secrets/ag_migrate_database_url
+      AG_DB_APP_ROLE: attentionguard_app
+    secrets: [ag_migrate_database_url]
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,8 +116,12 @@ volumes:
 secrets:
   ag_db_password:
     file: ./secrets/ag_db_password
+  ag_app_db_password:
+    file: ./secrets/ag_app_db_password
   ag_database_url:
     file: ./secrets/ag_database_url
+  ag_migrate_database_url:
+    file: ./secrets/ag_migrate_database_url
   ag_kek:
     file: ./secrets/ag_kek
   ag_jwt_signing_key:

@@ -5,7 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from ag_server.settings import PLACEHOLDER_MARKERS, Settings, SettingsError, load_settings
+from ag_server.settings import (
+    DEFAULT_APP_ROLE,
+    PLACEHOLDER_MARKERS,
+    Settings,
+    SettingsError,
+    load_migration_settings,
+    load_settings,
+)
 
 GOOD_KEK = "k" * 8 + "Zx9" * 12
 GOOD_JWT = "j" * 8 + "Qw3" * 12
@@ -133,3 +140,60 @@ def test_production_reports_every_problem_without_secret_values() -> None:
 def test_development_allows_placeholders() -> None:
     s = load_settings({"AG_ENV": "development", "AG_KEK": "changeme"})
     assert s.kek.get_secret_value() == "changeme"
+
+
+# --- migration settings (task 3.3: migrations run as the owner role) --------
+
+GOOD_MIGRATE_DB = "postgresql+psycopg://owner:" + "Mg4" * 10 + "@db:5432/ag"
+
+
+def test_migration_settings_use_their_own_url() -> None:
+    s = load_migration_settings(
+        {"AG_MIGRATE_DATABASE_URL": "postgresql+psycopg://owner@h/d", "AG_DATABASE_URL": "x"}
+    )
+    assert s.database_url.get_secret_value() == "postgresql+psycopg://owner@h/d"
+    assert s.app_role == DEFAULT_APP_ROLE
+
+
+def test_migration_settings_read_the_url_from_a_file(tmp_path: Path) -> None:
+    f = tmp_path / "migrate"
+    f.write_text(GOOD_MIGRATE_DB + "\n")
+    s = load_migration_settings({"AG_ENV": "production", "AG_MIGRATE_DATABASE_URL_FILE": str(f)})
+    assert s.database_url.get_secret_value() == GOOD_MIGRATE_DB
+
+
+def test_migration_settings_do_not_need_the_app_secrets() -> None:
+    # The migrate container gets only the owner DSN, never the KEK or JWT key.
+    s = load_migration_settings(
+        {"AG_ENV": "production", "AG_MIGRATE_DATABASE_URL": GOOD_MIGRATE_DB}
+    )
+    assert s.env == "production"
+    assert "Mg4Mg4" not in repr(s) + str(s)
+
+
+def test_migration_settings_fall_back_to_the_app_url_outside_production() -> None:
+    s = load_migration_settings({"AG_DATABASE_URL": "postgresql+psycopg://dev@h/d"})
+    assert s.database_url.get_secret_value() == "postgresql+psycopg://dev@h/d"
+    assert load_migration_settings({}).database_url.get_secret_value().startswith("postgresql")
+
+
+def test_production_migrations_require_the_owner_url() -> None:
+    with pytest.raises(SettingsError, match="AG_MIGRATE_DATABASE_URL"):
+        load_migration_settings({"AG_ENV": "production", "AG_DATABASE_URL": GOOD_DB})
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["sqlite:///x.db", "postgresql+psycopg://owner@db/ag", "postgresql+psycopg://o:changeme@db/a"],
+)
+def test_production_migration_url_is_checked(url: str) -> None:
+    with pytest.raises(SettingsError, match="AG_MIGRATE_DATABASE_URL"):
+        load_migration_settings({"AG_ENV": "production", "AG_MIGRATE_DATABASE_URL": url})
+
+
+def test_app_role_name_is_configurable_and_validated() -> None:
+    s = load_migration_settings({"AG_DB_APP_ROLE": "ag_app2"})
+    assert s.app_role == "ag_app2"
+    for bad in ('x"; DROP TABLE user; --', "Upper", "1abc", "a" * 64, "has space"):
+        with pytest.raises(SettingsError, match="AG_DB_APP_ROLE"):
+            load_migration_settings({"AG_DB_APP_ROLE": bad})

@@ -2,7 +2,8 @@
 
 `audit_log` and `purge_log` are append-only, use `bigserial` ids for strict
 order and reference other rows by type and id only (no foreign keys), so they
-outlive what they describe. The audit trigger and grants come with task 3.3.
+outlive what they describe. The append-only trigger and the app role's
+INSERT/SELECT-only grants on `audit_log` are in migration 0002 (task 3.3).
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Index,
     Integer,
     LargeBinary,
     Text,
@@ -70,6 +72,9 @@ class EvidenceDeletionItem(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_log"
+    # One hash chain per site (null site = global chain); the writer reads a
+    # chain's head by (site_id, id DESC).
+    __table_args__ = (Index("ix_audit_log_site_id_id", "site_id", "id"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     at: Mapped[datetime] = created_now()

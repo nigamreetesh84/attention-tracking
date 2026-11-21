@@ -91,3 +91,12 @@ def test_offline_sql_generation_works() -> None:
     sql = offline_sql("head")
     assert "CREATE TABLE camera" in sql
     assert "CREATE TYPE camera_role AS ENUM" in sql
+
+
+def test_offline_sql_contains_the_audit_trigger_and_grants() -> None:
+    from ag_server.migrations.runner import offline_sql
+
+    sql = offline_sql("head")
+    assert "CREATE TRIGGER audit_log_append_only" in sql
+    assert "CREATE TRIGGER audit_log_no_truncate" in sql
+    assert "GRANT SELECT, INSERT ON audit_log" in sql

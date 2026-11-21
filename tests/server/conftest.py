@@ -29,7 +29,43 @@ def pg_admin_dsn() -> str:
 
 
 @pytest.fixture(scope="session")
-def pg_dsn(pg_admin_dsn: str) -> Iterator[str]:
+def pg_app_role(pg_admin_dsn: str) -> Iterator[str]:
+    """A limited login role standing in for the application role (task 3.3).
+
+    Roles are cluster-wide, so the name is unique per session. Database
+    fixtures depend on this one, so their databases (and the grants in them)
+    are dropped before the role is.
+    """
+    name = f"ag_test_app_{uuid.uuid4().hex[:10]}"
+    admin = create_engine(pg_admin_dsn, isolation_level="AUTOCOMMIT")
+    try:
+        with admin.connect() as conn:
+            conn.execute(
+                text(f'CREATE ROLE "{name}" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT')
+            )
+        yield name
+    finally:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP ROLE IF EXISTS "{name}"'))
+        admin.dispose()
+
+
+@pytest.fixture(scope="session")
+def as_app_role(pg_app_role: str) -> Callable[[str], str]:
+    """Turn a DSN into the same database connecting as the app role.
+
+    The test server trusts local roles, so no password is needed.
+    """
+
+    def convert(dsn: str) -> str:
+        url = make_url(dsn).set(username=pg_app_role, password=None)
+        return url.render_as_string(hide_password=False)
+
+    return convert
+
+
+@pytest.fixture(scope="session")
+def pg_dsn(pg_admin_dsn: str, pg_app_role: str) -> Iterator[str]:
     """DSN of a throwaway database, created for this session and dropped after."""
     name = f"ag_test_{uuid.uuid4().hex[:12]}"
     admin = create_engine(pg_admin_dsn, isolation_level="AUTOCOMMIT")
@@ -53,7 +89,7 @@ def pg_engine(pg_dsn: str) -> Iterator[Engine]:
 
 
 @pytest.fixture(scope="session")
-def pg_database_factory(pg_admin_dsn: str) -> Iterator[Callable[[], str]]:
+def pg_database_factory(pg_admin_dsn: str, pg_app_role: str) -> Iterator[Callable[[], str]]:
     """Factory for extra throwaway databases (migration tests need empty ones).
 
     Every database it creates is dropped at the end of the session.
@@ -78,12 +114,15 @@ def pg_database_factory(pg_admin_dsn: str) -> Iterator[Callable[[], str]]:
 
 
 @pytest.fixture(scope="session")
-def migrated_dsn(pg_database_factory: Callable[[], str]) -> str:
-    """A throwaway database upgraded to the head migration (shared by read-mostly tests)."""
+def migrated_dsn(pg_database_factory: Callable[[], str], pg_app_role: str) -> str:
+    """A throwaway database upgraded to the head migration (shared by read-mostly tests).
+
+    Migrated as the admin (owner) role, with grants for the session's app role.
+    """
     from ag_server.migrations.runner import upgrade
 
     dsn = pg_database_factory()
-    upgrade(dsn, "head")
+    upgrade(dsn, "head", app_role=pg_app_role)
     return dsn
 
 

@@ -19,24 +19,28 @@ from sqlalchemy import create_engine, pool
 MIGRATIONS_DIR = Path(__file__).resolve().parent
 
 
-def alembic_config(url: str | None, *, stdout: io.StringIO | None = None) -> Config:
-    """A Config for this package's migrations; `url` overrides the settings."""
+def alembic_config(
+    url: str | None, *, stdout: io.StringIO | None = None, app_role: str | None = None
+) -> Config:
+    """A Config for this package's migrations; `url` and `app_role` override the settings."""
     cfg = Config(stdout=stdout) if stdout is not None else Config()
     cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
     cfg.attributes["configure_logging"] = False
     if url is not None:
         cfg.attributes["url"] = url
+    if app_role is not None:
+        cfg.attributes["app_role"] = app_role
     return cfg
 
 
-def upgrade(url: str, revision: str = "head") -> None:
-    """Upgrade the database at `url` to `revision`."""
-    command.upgrade(alembic_config(url), revision)
+def upgrade(url: str, revision: str = "head", *, app_role: str | None = None) -> None:
+    """Upgrade the database at `url` (connect as the schema owner) to `revision`."""
+    command.upgrade(alembic_config(url, app_role=app_role), revision)
 
 
-def downgrade(url: str, revision: str) -> None:
+def downgrade(url: str, revision: str, *, app_role: str | None = None) -> None:
     """Downgrade the database at `url` to `revision` (`base` removes everything)."""
-    command.downgrade(alembic_config(url), revision)
+    command.downgrade(alembic_config(url, app_role=app_role), revision)
 
 
 def head_revision() -> str | None:
@@ -54,10 +58,12 @@ def current_revision(url: str) -> str | None:
         engine.dispose()
 
 
-def offline_sql(revision: str = "head") -> str:
+def offline_sql(revision: str = "head", *, app_role: str | None = None) -> str:
     """The SQL an upgrade from base to `revision` would run (no database needed)."""
     buffer = io.StringIO()
-    cfg = alembic_config("postgresql+psycopg://offline@localhost/offline", stdout=buffer)
+    cfg = alembic_config(
+        "postgresql+psycopg://offline@localhost/offline", stdout=buffer, app_role=app_role
+    )
     cfg.output_buffer = buffer
     command.upgrade(cfg, revision, sql=True)
     return buffer.getvalue()
