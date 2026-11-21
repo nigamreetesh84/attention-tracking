@@ -430,6 +430,86 @@ def test_consent_follows_the_roster_in_force(clock: FakeClock) -> None:
         assert gate.decide_live().reason is GateReason.NO_SESSION
 
 
+# -- time base: device time on both sides (contract 6 "Clock"; 2.11 fix) ----------
+
+
+class _Offset:
+    def __init__(self, ms: int) -> None:
+        self.ms = ms
+
+    def offset_ms(self) -> int:
+        return self.ms
+
+
+@pytest.mark.parametrize(
+    ("login_offset_ms", "burst_offset_ms", "burst_after_login_s", "opens"),
+    [
+        # The server offset grows by 30 s after login. A burst that began 10 s
+        # before the session would look 20 s *after* it in corrected UTC; it
+        # must stay closed (frames of the previous worker or of nobody).
+        (0, 30_000, -10, False),
+        # The offset shrinks by 30 s: a burst 10 s into the session would look
+        # 20 s before it in corrected UTC; it is the worker's and may open.
+        (30_000, 0, 10, True),
+        (5_000, 5_000, -1, False),
+        (5_000, 5_000, 1, True),
+    ],
+)
+def test_the_gate_compares_session_and_burst_in_device_time(
+    clock: FakeClock,
+    login_offset_ms: int,
+    burst_offset_ms: int,
+    burst_after_login_s: int,
+    opens: bool,
+) -> None:
+    """The UI stamps records with corrected UTC, but what it pushes to the
+    engine child (the session start) and what the child compares it with (the
+    burst's frames) are both device time, so no offset change can open the
+    gate for a burst that started before the session."""
+    from ag_workstation.corrected_time import StampingClock
+    from ag_workstation.service.station import PushedSession, PushedSessions
+
+    roster = StaticRosterSource(bundle(shifts=False))
+    offset = _Offset(login_offset_ms)
+    with AuthStateStore.in_memory() as state:
+        manager = SessionManager(
+            registry=LoginMethodRegistry(),
+            roster=roster,
+            records=_NullRecords(),
+            engine=FakeStationEngine(clock),
+            state=state,
+            clock=clock,
+            utc=StampingClock(clock, offset),
+        )
+        clock.advance(60)
+        manager.handle_assign_worker(
+            AssignWorkerCommand(
+                id=new_uuid7(),
+                assignment_id=new_uuid7(),
+                user_id=W1,
+                valid_until=T0 + timedelta(hours=8),
+            )
+        )
+        login_at = clock.now()
+        clock.advance(30)
+        offset.ms = burst_offset_ms
+        current = manager.current()
+        assert current is not None
+        # What `SessionPusher` sends, as the engine child stores it.
+        pushed = PushedSessions(clock)
+        pushed.set(
+            PushedSession(current.session_id, current.user_id, current.started_at, True), 5.0
+        )
+        child_gate = CaptureGate(sessions=pushed, bundles=None, clock=clock)
+        # A burst whose earliest frame is `burst_after_login_s` from the login.
+        probe = BUILDER.build(new_uuid7(), BurstKind.SCAN_WARNING, login_at)
+        lead = login_at - min(f.captured_at for f in probe.frames)
+        first_frame = login_at + timedelta(seconds=burst_after_login_s)
+        b = BUILDER.build(new_uuid7(), BurstKind.SCAN_WARNING, first_frame + lead)
+        assert min(f.captured_at for f in b.frames) == first_frame
+        assert child_gate.decide(b).open is opens
+
+
 # -- fail-safe -----------------------------------------------------------------
 
 

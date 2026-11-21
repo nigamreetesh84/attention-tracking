@@ -10,8 +10,9 @@ transport); `sync_service_from_env` reads the service environment:
 Files under the data directory: `queue.db` (opened by the caller),
 `evidence/` (opened here, before the engine child starts, because opening
 sweeps temporary files), `config/bundle.agc` (the last good bundle),
-`device.agk` (sealed device credentials) and `commands.db` (session
-commands for the UI).
+`device.agk` (sealed device credentials), `commands.db` (session
+commands for the UI) and `clock_offset.json` (the server clock offset for
+the UI and the engine child, `corrected_time`; plain, it is not secret).
 """
 
 import logging
@@ -25,6 +26,7 @@ from typing import Final, Protocol
 from ag_shared.api import EventType, LocalAlertPayload
 
 from ag_workstation.clock import Clock
+from ag_workstation.corrected_time import OffsetPublisher, offset_path, stamping_clock
 from ag_workstation.engine_api import EngineHealth, StationState
 from ag_workstation.evidence.store import EvidenceStore
 from ag_workstation.queue.keys import KeyProvider
@@ -205,6 +207,7 @@ def build_sync_service(
         evidence=evidence,
         inbox=inbox,
         status=status,
+        on_offset=OffsetPublisher(offset_path(data_dir), clock).publish,
     )
     return SyncService(
         client=client,
@@ -329,15 +332,17 @@ def service_components(
         )
     keeper = standard_housekeeping(clock, queue=queue, evidence=evidence)
     offset = (lambda: sync.client.health().clock_offset_ms) if sync is not None else (lambda: 0)
+    # Records of this process carry corrected UTC too (contract 6); timing stays raw.
+    utc = stamping_clock(clock, data_dir)
     keeper.add(
         "health_sample",
         HEALTH_SAMPLE_S,
-        HealthSampler(reporter, queue, clock, offset=offset),
+        HealthSampler(reporter, queue, utc, offset=offset),
         run_first=False,
     )
 
     def queue_alert(payload: LocalAlertPayload) -> None:
-        queue.enqueue(EventType.LOCAL_ALERT, payload, clock.now())
+        queue.enqueue(EventType.LOCAL_ALERT, payload, utc.now())
 
     keeper.add(
         "monitoring_alerts",

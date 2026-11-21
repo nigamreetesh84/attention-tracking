@@ -154,6 +154,7 @@ def default_service_host(env: Mapping[str, str] | None = None) -> ServiceHost:
     import os
 
     from ag_workstation.clock import SystemClock
+    from ag_workstation.corrected_time import stamping_clock
     from ag_workstation.queue import EventQueue
     from ag_workstation.service.child import ProcessLauncher
     from ag_workstation.service.engine_factory import DATA_DIR_ENV, key_provider_from_env
@@ -175,7 +176,8 @@ def default_service_host(env: Mapping[str, str] | None = None) -> ServiceHost:
     if data_dir is not None and keys is not None:
         try:
             queue = EventQueue.open(data_dir / "queue.db", keys, clock)
-            on_alert = QueueLocalAlertSink(queue, clock)
+            # Alerts carry corrected UTC (contract 6); the supervisor times on the raw clock.
+            on_alert = QueueLocalAlertSink(queue, stamping_clock(clock, data_dir))
         except Exception as exc:
             logger.error("local queue unavailable (%s); alerts are logged", type(exc).__name__)
     launcher = ProcessLauncher.real(PipeTransport(default_address(), authkey))

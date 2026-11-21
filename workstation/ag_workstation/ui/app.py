@@ -64,6 +64,7 @@ from ag_workstation.auth import (
 )
 from ag_workstation.clock import Clock, SystemClock
 from ag_workstation.consent import CaptureGate
+from ag_workstation.corrected_time import stamping_clock
 from ag_workstation.engine_api import (
     BurstKind,
     ConfigApplyResult,
@@ -276,6 +277,9 @@ def assemble(
     session push, PPE config and evidence bursts to the engine child."""
     clock = clock or SystemClock()
     data_dir.mkdir(parents=True, exist_ok=True)
+    # Records carry server-corrected UTC from the offset the service publishes
+    # (contract 6); sessions, the capture gate and all timing stay on `clock`.
+    utc = stamping_clock(clock, data_dir)
     closers: list[Callable[[], None]] = []
     fake: FakeStationEngine | None = None
     engine: IpcClient | FakeStationEngine | UnreachableEngine
@@ -338,6 +342,7 @@ def assemble(
         engine=fake if fake is not None else (control or AcceptingConfigTarget()),
         state=auth_state,
         clock=clock,
+        utc=utc,
     )
     manager.recover()
     closers.append(manager.shutdown)
@@ -350,7 +355,7 @@ def assemble(
         engine=engine,
         evidence=evidence,
         sessions=manager,
-        clock=clock,
+        clock=utc,
         gate=gate,
     )
     flow.recover_journal()
@@ -389,7 +394,7 @@ def assemble(
     login = LoginPresenter(backend=backend, runner=auth_runner, clock=clock)
     record: RecordPresenter | None = None
     if record_store is not None:
-        disputes = DisputeService(record_store, queue, clock)
+        disputes = DisputeService(record_store, queue, utc)
         disputes.recover()
         record_runner = ThreadRunner("record")
         closers.append(record_runner.close)

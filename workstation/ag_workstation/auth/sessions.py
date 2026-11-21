@@ -3,8 +3,15 @@
 One session at most is open per station. A new login or supervisor
 assignment replaces the open one (ended with reason `replaced`). Every start
 and end is queued as a `session_start` / `session_end` item whose ids are
-UUIDv7 and whose times come from the injected (server-corrected UTC) clock;
-the `session_start` item id is the session id.
+UUIDv7 and whose times come from the `utc` clock (server-corrected UTC,
+contract 6); the `session_start` item id is the session id.
+
+Time bases (2.11 fix): `CurrentSession.started_at` and the persisted open
+session are **device time** (the raw `clock`), because the session start is
+pushed to the engine child's capture gate, which compares it with the
+burst's frames in device time; a change of the server offset then can never
+open the gate for frames from before the session. Records and comparisons
+with server-issued times (`valid_until`) use corrected UTC.
 
 PPE override: when a session starts, the worker's roster
 `ppe_profile_override` selects the engine profile and thresholds
@@ -139,8 +146,9 @@ class CurrentSession:
     method: SessionMethod
     station_assignment_id: UUID | None
     started_at: datetime
+    """Device time (the capture gate's time base); the record carries corrected UTC."""
     valid_until: datetime | None
-    """End of a supervisor assignment; None for a login."""
+    """End of a supervisor assignment (server time); None for a login."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,14 +184,18 @@ class SessionManager:
         state: AuthStateStore,
         clock: Clock,
         ids: Uuid7Generator | None = None,
+        utc: Clock | None = None,
     ) -> None:
+        """`clock` is the device clock; `utc` the server-corrected clock that
+        stamps records (default: `clock`)."""
         self._registry = registry
         self._roster = roster
         self._records = records
         self._engine = engine
         self._state = state
         self._clock = clock
-        self._ids = ids or Uuid7Generator(now=clock.now)
+        self._utc = utc or clock
+        self._ids = ids or Uuid7Generator(now=self._utc.now)
         self._lock = threading.RLock()
         self._active: CurrentSession | None = None
         self._engine_profile: UUID | None = None
@@ -210,7 +222,7 @@ class SessionManager:
                     SessionEndPayload(
                         session_id=row.session_id, end_reason=EndCause.RECOVERED.wire_reason
                     ),
-                    now,
+                    self._utc.now(),
                 )
                 self._set_open(None)
 
@@ -269,7 +281,7 @@ class SessionManager:
                 return CommandOutcome.DUPLICATE
             for key in keys:
                 self._mark_handled(key)
-            if command.valid_until <= self._clock.now():
+            if command.valid_until <= self._utc.now():
                 logger.info("assignment %s arrived expired", command.assignment_id)
                 return CommandOutcome.EXPIRED
             bundle = self._roster.current_bundle()
@@ -360,7 +372,7 @@ class SessionManager:
         bundle = self._roster.current_bundle()
         effective = self._apply_profile(entry.ppe_profile_override, bundle)
         session_id = self._ids()
-        now = self._clock.now()
+        now = self._clock.now()  # device time: pushed to the capture gate
         self._write(
             EventType.SESSION_START,
             SessionStartPayload(
@@ -369,7 +381,7 @@ class SessionManager:
                 station_assignment_id=assignment_id,
                 ppe_profile_id=effective,
             ),
-            now,
+            self._utc.now(),
             record_id=session_id,
         )
         self._set_open(OpenSessionRow(session_id, entry.user_id, now))
@@ -397,7 +409,7 @@ class SessionManager:
         self._write(
             EventType.SESSION_END,
             SessionEndPayload(session_id=active.session_id, end_reason=cause.wire_reason),
-            self._clock.now(),
+            self._utc.now(),
         )
         self._set_open(None)
         logger.info("session %s ended (%s)", active.session_id, cause.value)
@@ -409,7 +421,7 @@ class SessionManager:
         if (
             active is not None
             and active.valid_until is not None
-            and self._clock.now() >= active.valid_until
+            and self._utc.now() >= active.valid_until
         ):
             self._end(EndCause.ASSIGNMENT_EXPIRED)
 
@@ -469,7 +481,7 @@ class SessionManager:
                     kind=LocalAlertKind.OTHER,
                     detail={"event": event, "method": method, "employee_id": subject},
                 ),
-                self._clock.now(),
+                self._utc.now(),
             )
 
     def _set_open(self, row: OpenSessionRow | None) -> None:

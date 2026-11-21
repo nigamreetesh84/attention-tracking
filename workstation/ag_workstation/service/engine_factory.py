@@ -42,6 +42,7 @@ from ag_workstation.clock import Clock, SystemClock
 from ag_workstation.consent.gate import CaptureGate
 from ag_workstation.consent.permit import CapturePermit
 from ag_workstation.consent.sink import CaptureOutcome, GatedEvidenceSink, SavedBurst
+from ag_workstation.corrected_time import stamping_clock
 from ag_workstation.engine.adapter import PUMP_INTERVAL_S, EngineAdapter
 from ag_workstation.engine.runtime import Engine, FeedFactory, ProviderFactory
 from ag_workstation.engine_api import EngineEventListener, EvidenceBurst
@@ -207,6 +208,10 @@ def build_station(
 
     data_raw = env.get(DATA_DIR_ENV, "").strip()
     data_dir = Path(data_raw) if data_raw else None
+    # Records (episodes, buckets, evidence, alerts) carry corrected UTC from the
+    # offset the service publishes (contract 6). The engine, rings, assembler
+    # and capture gate stay on device time.
+    utc = stamping_clock(clock, data_dir)
     keys = keys or key_provider_from_env(env, data_dir)
     if config is None and data_dir is not None and keys is not None:
         config = station_config_from_bundle(data_dir, keys)
@@ -217,9 +222,11 @@ def build_station(
             # Enqueue only: the service parent is the queue's single sender.
             queue = EventQueue.open(data_dir / "queue.db", keys, clock, recover_sending=False)
             closers.append(queue.close)
-            alert_sink = QueueDiskFullAlert(queue, clock)
+            alert_sink = QueueDiskFullAlert(queue, utc)
             store = (
-                EvidenceStore.open(data_dir / "evidence", keys, clock, alert_sink=alert_sink)
+                EvidenceStore.open(
+                    data_dir / "evidence", keys, clock, alert_sink=alert_sink, stamp=utc.stamp
+                )
                 if evidence_disk_free is None
                 else EvidenceStore.open(
                     data_dir / "evidence",
@@ -227,6 +234,7 @@ def build_station(
                     clock,
                     alert_sink=alert_sink,
                     disk_free=evidence_disk_free,
+                    stamp=utc.stamp,
                 )
             )
             closers.append(store.close)
@@ -248,7 +256,7 @@ def build_station(
             record_closers = [record_store.close, mirror.close]
         except Exception as exc:
             logger.error("my record unavailable in the engine child (%s)", type(exc).__name__)
-    recorder = EngineEventRecorder(recorder_queue, sessions, outcomes, clock)
+    recorder = EngineEventRecorder(recorder_queue, sessions, outcomes, clock, stamp=utc.stamp)
     if queue is not None:
         # Before the queue closes (closers run in reverse): queue waiting episodes,
         # then stop the record mirror, then close the queue.

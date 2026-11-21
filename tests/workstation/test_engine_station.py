@@ -3,7 +3,7 @@
 import json
 import time
 from collections.abc import Callable, Iterator, Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -15,6 +15,7 @@ from ag_shared.states import AttentionState
 from ag_workstation.capture.types import Frame, Image
 from ag_workstation.clock import FakeClock
 from ag_workstation.consent import CaptureOutcome, GateReason
+from ag_workstation.corrected_time import OffsetPublisher, StampingClock, offset_path
 from ag_workstation.engine.adapter import FLAG_MODEL_UNAVAILABLE, FLAG_NOT_CONFIGURED
 from ag_workstation.engine.fakes import T0, StubFeed, engine_config, face_result, frame
 from ag_workstation.engine_api import BurstKind, StateBucket, StateEpisode
@@ -479,6 +480,126 @@ def test_recorder_waits_for_a_late_key_frame_then_gives_up() -> None:
         ImagesWithheld.NONE,
         ImagesWithheld.DISK_FULL,
     ]
+
+
+def _when(value: object) -> datetime:
+    assert isinstance(value, str)
+    return datetime.fromisoformat(value)
+
+
+class _Offset:
+    def __init__(self, ms: int) -> None:
+        self.ms = ms
+
+    def offset_ms(self) -> int:
+        return self.ms
+
+
+@pytest.mark.parametrize(("offset_ms", "minute_shift"), [(5000, 0), (-5000, 0), (40_000, 1)])
+def test_recorder_stamps_records_with_corrected_utc(offset_ms: int, minute_shift: int) -> None:
+    """Contract 6: records carry corrected UTC. Attribution and timing inside
+    the child stay in device time; a bucket keeps its whole-minute start
+    (the nearest corrected minute)."""
+    clock = FakeClock(start_utc=T0)
+    sessions = PushedSessions(clock)
+    sessions.set(PushedSession(SESSION, USER, T0, True), 60.0)
+    queued: list[tuple[str, dict[str, object], object]] = []
+
+    class Queue:
+        def enqueue(
+            self, item_type: str, payload: object, occurred_at: object, **kw: object
+        ) -> object:
+            queued.append((item_type, payload.model_dump(mode="json"), occurred_at))  # type: ignore[attr-defined]  # a pydantic payload
+            return None
+
+    utc = StampingClock(clock, _Offset(offset_ms))
+    recorder = EngineEventRecorder(
+        Queue(), sessions, OutcomeRegistry(clock), clock, stamp=utc.stamp
+    )
+    end = T0 + timedelta(seconds=30)
+    episode = StateEpisode(EVENT, A.DISTRACTED, T0, 0.9, False, "v", 1, ended_at=end)
+    recorder.episode_opened(episode)
+    recorder.episode_closed(episode)
+    shift = timedelta(milliseconds=offset_ms)
+    (kind, payload, occurred_at) = queued[0]
+    assert kind == EventType.ATTENTION_EVENT
+    assert _when(payload["started_at"]) == T0 + shift
+    assert _when(payload["ended_at"]) == end + shift
+    assert occurred_at == T0 + shift
+    minute = T0.replace(second=0, microsecond=0)
+    recorder.bucket_closed(StateBucket(minute, {A.ATTENTIVE: 60.0}))
+    (_, bucket, bucket_at) = queued[1]
+    corrected = minute + timedelta(minutes=minute_shift)
+    assert _when(bucket["bucket_start"]) == corrected
+    assert bucket_at == corrected + timedelta(minutes=1)
+
+
+def test_a_failing_stamp_falls_back_to_device_time() -> None:
+    clock = FakeClock(start_utc=T0)
+    sessions = PushedSessions(clock)
+    sessions.set(PushedSession(SESSION, USER, T0, True), 60.0)
+    at: list[object] = []
+
+    class Queue:
+        def enqueue(
+            self, item_type: str, payload: object, occurred_at: object, **kw: object
+        ) -> object:
+            at.append(occurred_at)
+            return None
+
+    def broken(_: datetime) -> datetime:
+        raise RuntimeError("offset bug")
+
+    recorder = EngineEventRecorder(Queue(), sessions, OutcomeRegistry(clock), clock, stamp=broken)
+    episode = StateEpisode(EVENT, A.DISTRACTED, T0, 0.9, False, "v", 1, ended_at=T0)
+    recorder.episode_opened(episode)
+    recorder.episode_closed(episode)
+    assert at == [T0]
+    assert recorder.recorded == 1 and recorder.lost == 0
+
+
+def test_child_stamps_evidence_and_episodes_from_the_shared_offset(tmp_path: Path) -> None:
+    """The engine child reads the offset the service parent published: stored
+    frames and queued episodes carry corrected UTC, the gate still opens on
+    device time, and the stored images still decrypt (associated data)."""
+    data = tmp_path / "data"
+    data.mkdir()
+    publish = FakeClock(start_utc=T0)
+    OffsetPublisher(offset_path(data), publish).publish(5000)
+    station = Station(tmp_path)
+    try:
+        station.login()
+        station.run(6.0)
+        station.world.ear = {1: 0.05, 2: 0.05}
+        station.run(6.0)
+        engine = station.child.adapter.engine
+        assert engine is not None
+        sleeping = engine.open_episode()
+        assert sleeping is not None
+        state = station.child.scan_state()
+        station.child.request_burst(EVENT, BurstKind.SCAN_WARNING, state.ts)
+        station.run(2.0)
+        assert _outcome(station.child, EVENT).gate_reason is GateReason.OPEN
+        _wait(lambda: station.child.burst_outcome(sleeping.id).status == "done")
+        station.world.ear = {1: 0.30, 2: 0.30}
+        station.run(4.0)
+    finally:
+        station.child.close()
+    store = EvidenceStore.open(data / "evidence", InMemoryKeyProvider(KEY), station.clock)
+    try:
+        images = store.event_images(EVENT)
+        assert len(images) == 6
+        # The fake frames are all captured at T0 (device time).
+        assert {i.captured_at for i in images} == {T0 + timedelta(seconds=5)}
+        assert store.read_for_upload(images[0].image_id).headers.captured_at == T0 + timedelta(
+            seconds=5
+        )
+    finally:
+        store.close()
+    episodes = [p for t, p in station.records() if t == EventType.ATTENTION_EVENT]
+    first = episodes[0]
+    expected = sleeping.started_at + timedelta(seconds=5)
+    assert abs(_when(first["started_at"]) - expected) < timedelta(milliseconds=1)
 
 
 def test_fan_out_isolates_listeners() -> None:

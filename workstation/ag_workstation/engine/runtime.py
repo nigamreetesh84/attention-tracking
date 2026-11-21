@@ -499,6 +499,14 @@ class Engine:
         except Exception:
             return False
 
+    def tick_age(self) -> float | None:
+        """Seconds since the last successful tick; None before the first one
+        or while stopped (lock-free, for liveness checks)."""
+        last = self._last_tick
+        if not self._running or last is None:
+            return None
+        return self._clock.monotonic() - last
+
     def open_episode(self) -> Episode | None:
         """The episode in progress (for scan warnings to reference).
 

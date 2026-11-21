@@ -39,11 +39,15 @@ Scope 4.4 row -> scenarios (`SCENARIOS`, checked by
 | Both cameras offline   | test_both_cameras_offline                                   |
 | Server unreachable     | test_server_unreachable                                     |
 | Detection engine crash | test_engine_child_process_killed (POSIX),                   |
-|                        | test_engine_tick_thread_dead, test_engine_ipc_unavailable,  |
-|                        | test_engine_answer_hangs                                    |
+|                        | test_engine_tick_thread_dead,                               |
+|                        | test_dead_engine_tick_is_reported_and_restarted,            |
+|                        | test_dead_engine_tick_stops_the_heartbeat_and_alerts,       |
+|                        | test_engine_ipc_unavailable, test_engine_answer_hangs       |
 | Disk full              | test_disk_full_purges_oldest_images_and_alerts,             |
 |                        | test_disk_full_for_metadata_keeps_scans_in_the_journal      |
-| Clock drift            | test_clock_drift                                            |
+| Clock drift            | test_clock_drift,                                           |
+|                        | test_scan_records_are_stamped_with_corrected_utc,           |
+|                        | test_corrected_clock_keeps_the_capture_gate_on_device_time  |
 
 Interpretation of "Camera offline: status becomes Unknown": that camera's
 status and candidate are offline/Unknown; the station continues on the
@@ -54,8 +58,9 @@ station it is Unknown. The admin/supervisor alert is a `camera_offline`
 unavailable" is both the scan-screen banner and a `monitoring_unavailable`
 `local_alert`.
 
-Two strict xfails at the end record gaps outside builder territory (see their
-reasons and PROGRESS 2.11).
+The two scenarios at the end were strict xfails for the architect in 2.11
+(a dead tick thread inside a live child; records stamped with the raw PC
+clock) and pass since the 2.11 fix (PROGRESS 2.11 fix).
 """
 
 import os
@@ -85,6 +90,7 @@ from ag_shared.states import AttentionState, ScanOutcome
 from ag_workstation.auth import StaticRosterSource
 from ag_workstation.capture.types import CameraHealth, Frame, Image
 from ag_workstation.clock import FakeClock, SystemClock
+from ag_workstation.engine.adapter import TICK_STALL_RESTART_S
 from ag_workstation.engine.fakes import StubFeed, face_result
 from ag_workstation.engine.runtime import Engine
 from ag_workstation.engine_api import SCAN_QUERY_BUDGET_S, StationState
@@ -106,6 +112,7 @@ from ag_workstation.service import (
     ServiceHost,
     SupervisorConfig,
 )
+from ag_workstation.service.child import beat_allowed
 from ag_workstation.service.engine_factory import DATA_DIR_ENV, build_station
 from ag_workstation.service.host import QueueLocalAlertSink
 from ag_workstation.service.monitoring_alerts import ALERT_AFTER_S
@@ -146,6 +153,8 @@ SCENARIOS: dict[str, tuple[str, ...]] = {
     "Detection engine crash": (
         "test_engine_child_process_killed",
         "test_engine_tick_thread_dead",
+        "test_dead_engine_tick_is_reported_and_restarted",
+        "test_dead_engine_tick_stops_the_heartbeat_and_alerts",
         "test_engine_ipc_unavailable",
         "test_engine_answer_hangs",
     ),
@@ -153,7 +162,11 @@ SCENARIOS: dict[str, tuple[str, ...]] = {
         "test_disk_full_purges_oldest_images_and_alerts",
         "test_disk_full_for_metadata_keeps_scans_in_the_journal",
     ),
-    "Clock drift": ("test_clock_drift",),
+    "Clock drift": (
+        "test_clock_drift",
+        "test_scan_records_are_stamped_with_corrected_utc",
+        "test_corrected_clock_keeps_the_capture_gate_on_device_time",
+    ),
 }
 """Scope 4.4 failure row -> the scenarios that cover it."""
 
@@ -254,19 +267,25 @@ class _Feed(StubFeed):
 
 
 class _AliveChild:
-    """The supervisor's process handle while the engine runs in this process."""
+    """The supervisor's process handle while the engine runs in this process.
+
+    With `engine` set it beats as `engine_child_main` does: only while the
+    served engine reports itself alive (`service.child.beat_allowed`)."""
 
     pid = 4242
     exitcode = None
 
-    def __init__(self) -> None:
+    def __init__(self, engine: Callable[[], object | None] | None = None) -> None:
         self.beats = 0
+        self._engine = engine
 
     def is_alive(self) -> bool:
         return True
 
     def heartbeat(self) -> int:
-        self.beats += 1
+        engine = self._engine() if self._engine is not None else None
+        if engine is None or beat_allowed(engine):
+            self.beats += 1
         return self.beats
 
     def kill(self) -> None:
@@ -274,14 +293,19 @@ class _AliveChild:
 
 
 class _InProcessLauncher:
+    def __init__(self, engine: Callable[[], object | None] | None = None) -> None:
+        self._engine = engine
+        self.launched = 0
+
     def launch(self) -> _AliveChild:
-        return _AliveChild()
+        self.launched += 1
+        return _AliveChild(self._engine)
 
 
 class Station:
     """One assembled workstation (UI process + engine child + service parent)."""
 
-    def __init__(self, root: Path, *, cameras: int = 2) -> None:
+    def __init__(self, root: Path, *, cameras: int = 2, liveness: bool = False) -> None:
         self.root = root
         self.data = root / "data"
         self.data.mkdir(parents=True)
@@ -296,8 +320,11 @@ class Station:
 
         # Service parent (opened first, as in production: it sweeps the evidence store).
         self.sender = EventQueue.open(self.data / "queue.db", self.keys, self.clock)
+        self.launcher = _InProcessLauncher(
+            (lambda: getattr(self, "child", None)) if liveness else None
+        )
         self.supervisor = EngineSupervisor(
-            _InProcessLauncher(),
+            self.launcher,
             self.clock,
             on_alert=QueueLocalAlertSink(self.sender, self.clock),
         )
@@ -461,11 +488,11 @@ def make_station() -> Iterator[Callable[..., Station]]:
     stations: list[Station] = []
     roots: list[Path] = []
 
-    def make(cameras: int = 2) -> Station:
+    def make(cameras: int = 2, liveness: bool = False) -> Station:
         # A short path: AF_UNIX socket paths are limited to about 100 bytes.
         root = Path(tempfile.mkdtemp(prefix="agfo"))
         roots.append(root)
-        station = Station(root, cameras=cameras)
+        station = Station(root, cameras=cameras, liveness=liveness)
         stations.append(station)
         return station
 
@@ -965,19 +992,9 @@ def test_clock_drift(make_station: Callable[..., Station]) -> None:
         assert result.scan_id in station.device.unique_items(EventType.SCAN)
 
 
-# -- gaps for the architect (strict xfails) ------------------------------------------
+# -- the two 2.11 architect gaps, fixed (PROGRESS 2.11 fix) ------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "architect (engine adapter/supervision): a live engine child whose engine has "
-        "stopped ticking reports health RUNNING/monitoring available, so neither the "
-        "supervisor (child heartbeat still beats) nor the monitoring alerts notice; "
-        "scope 4.4 'engine crash: auto-restart within seconds' is not met for a dead "
-        "tick thread. PROGRESS 2.11."
-    ),
-)
 def test_dead_engine_tick_is_reported_and_restarted(make_station: Callable[..., Station]) -> None:
     station = make_station(cameras=2)
     _awake_and_logged_in(station)
@@ -988,16 +1005,6 @@ def test_dead_engine_tick_is_reported_and_restarted(make_station: Callable[..., 
     assert health.status not in (EngineStatus.RUNNING, EngineStatus.DEGRADED)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "contract 6 'stamps records with corrected UTC': only the sync client's own "
-        "records use CorrectedClock; the UI (scans, sessions) and the engine child "
-        "(episodes, evidence captured_at) stamp the raw PC clock. Fixing it moves the "
-        "time base the capture gate compares (pushed session start vs burst start), so "
-        "it is handed to the architect. PROGRESS 2.9 open item, 2.11."
-    ),
-)
 def test_scan_records_are_stamped_with_corrected_utc(make_station: Callable[..., Station]) -> None:
     station = make_station(cameras=2)
     _awake_and_logged_in(station)
@@ -1011,3 +1018,87 @@ def test_scan_records_are_stamped_with_corrected_utc(make_station: Callable[...,
     (record,) = [r for r in station.queued(EventType.SCAN) if r.id == result.scan_id]
     expected = station.clock.now() + timedelta(seconds=5)
     assert abs((record.occurred_at - expected).total_seconds()) < 1.0
+
+
+def test_dead_engine_tick_stops_the_heartbeat_and_alerts(
+    make_station: Callable[..., Station],
+) -> None:
+    """The child beats as `engine_child_main` does (only while the engine is
+    alive): a dead tick thread stops the heartbeat, the real supervisor
+    declares the child hung within seconds and queues `engine_restart`;
+    scans stay accepted (Unknown) throughout; normal start-up never trips it."""
+    station = make_station(cameras=2, liveness=True)
+    _awake_and_logged_in(station)
+    assert station.supervisor.health().status is EngineStatus.RUNNING
+    assert station.alerts(LocalAlertKind.ENGINE_RESTART) == []  # no false restart at start-up
+    assert station.scan("H-1").outcome is ScanOutcome.ATTENTIVE
+
+    stalled_at = station.clock.monotonic()
+    while station.supervisor.health().restarts == 0:
+        elapsed = station.clock.monotonic() - stalled_at
+        assert elapsed < TICK_STALL_RESTART_S + SupervisorConfig().heartbeat_timeout_s + 0.5
+        station.run(0.1, tick_engine=False)  # a supervisor poll per step
+    assert station.supervisor.health().last_error == "hung"
+    unknown = station.scan("H-2")
+    assert (unknown.state, unknown.outcome) == (AttentionState.UNKNOWN, ScanOutcome.UNMONITORED)
+    (alert,) = station.alerts(LocalAlertKind.ENGINE_RESTART)
+    assert alert["detail"]["reason"] == "hung"
+    assert station.launcher.launched == 2
+
+    # In production the new child has a fresh tick thread; here the tick resumes.
+    station.run(3.0)
+    assert station.supervisor.health().status is EngineStatus.RUNNING
+    assert station.supervisor.health().restarts == 1
+    assert station.scan("H-3").outcome is ScanOutcome.ATTENTIVE
+    station.assert_scans_recorded()
+
+
+def test_corrected_clock_keeps_the_capture_gate_on_device_time(
+    make_station: Callable[..., Station],
+) -> None:
+    """Consent safety under a server offset that changes after login: the
+    burst whose pre frames predate the session stays withheld (device time on
+    both sides of the gate), a later burst is stored, and what is stored and
+    queued carries corrected UTC."""
+    station = make_station(cameras=2)
+    station.cams.ear = ASLEEP
+    station.run(8.0)
+    station.login()  # no offset known yet: the session record is stamped raw
+    login_at = station.clock.now()
+    client = station.sync.client
+    station.device.skew = timedelta(seconds=30)  # now the server says the PC is 30 s behind
+    client.tick()
+    assert abs(client.health().clock_offset_ms - 30_000) < 100
+    station.run(0.5)
+    assert station.child.scan_state().outcome is ScanOutcome.WARNED
+
+    early = _warned_scan_with_burst(station, "G-1")  # pre frames from before the login
+    early_event = _event(station, early)
+    assert early_event["image_ids"] == []
+    assert early_event["images_withheld"] == ImagesWithheld.NO_WORKER.value
+
+    station.run(3.0)
+    late = _warned_scan_with_burst(station, "G-2")
+    late_event = _event(station, late)
+    assert late_event["image_ids"]
+    assert late_event["images_withheld"] == ImagesWithheld.NONE.value
+
+    # Uploaded by the sync round above, stamped before any offset was known.
+    (session_id,) = station.device.unique_items(EventType.SESSION_START)
+    session_item: Any = station.device.items[session_id]  # Any: decoded JSON object
+    started = datetime.fromisoformat(str(session_item["occurred_at"]))
+    assert abs((started - login_at).total_seconds()) < 0.5
+    (late_scan,) = [r for r in station.queued(EventType.SCAN) if r.id == late.scan_id]
+    assert late_scan.occurred_at - late.scanned_at == timedelta(0)
+    assert abs((late.scanned_at - station.clock.now()).total_seconds() - 30) < 3.0
+    store = EvidenceStore.open(station.data / "evidence", station.keys, station.clock)
+    try:
+        assert late.event_id is not None
+        images = store.event_images(late.event_id)
+        assert images
+        for image in images:  # device capture time + 30 s, after the login either way
+            assert image.captured_at > login_at + timedelta(seconds=29)
+            assert image.captured_at <= station.clock.now() + timedelta(seconds=30)
+    finally:
+        store.close()
+    station.assert_scans_recorded()

@@ -5,6 +5,12 @@ Windows). The child builds the engine from a `"module:function"` factory
 path, serves it over IPC, and bumps a shared heartbeat counter from its main
 loop. Killing the process, or freezing it, stops the counter; the supervisor
 notices and relaunches.
+
+The counter also stops while the served engine reports itself not alive
+(`alive()`, the real engine's `StationChild`: its tick thread died or hangs
+while the process and the IPC server live on). The child keeps serving, so
+scans get Unknown at once, and the supervisor restarts it within seconds
+and raises `engine_restart` (scope 4.4; PROGRESS 2.11 fix).
 """
 
 import contextlib
@@ -36,6 +42,20 @@ class _Counter(Protocol):
     value: int
 
 
+def beat_allowed(engine: object) -> bool:
+    """Whether the child may beat for `engine`: its `alive()` if it has one.
+
+    Never raises; a failing probe answers True (a probe bug must not put a
+    working child into a restart loop; the engine's health reports it)."""
+    alive = getattr(engine, "alive", None)
+    if not callable(alive):
+        return True
+    try:
+        return alive() is not False
+    except Exception:
+        return True
+
+
 def resolve_factory(path: str) -> EngineFactory:
     """Import `"package.module:function"`."""
     module_name, sep, attr = path.partition(":")
@@ -54,20 +74,22 @@ def engine_child_main(
     interval_s: float = HEARTBEAT_INTERVAL_S,
     *,
     sleep: Callable[[float], None] = time.sleep,
-    max_beats: int | None = None,
+    max_loops: int | None = None,
 ) -> None:
-    """Child entry point: build, serve, beat. Runs until killed."""
+    """Child entry point: build, serve, beat while the engine is alive. Runs
+    until killed (`max_loops` bounds the loop for tests)."""
     publisher = EventPublisher()
     engine = resolve_factory(factory_path)(publisher)
     control = engine if isinstance(engine, StationControl) else None
     server = IpcServer(transport, engine, control=control)
     publisher.bind(server)
     server.start()
-    beats = 0
+    loops = 0
     try:
-        while max_beats is None or beats < max_beats:
-            counter.value += 1
-            beats += 1
+        while max_loops is None or loops < max_loops:
+            if beat_allowed(engine):
+                counter.value += 1
+            loops += 1
             sleep(interval_s)
     finally:
         server.stop()

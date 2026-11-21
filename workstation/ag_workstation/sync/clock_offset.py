@@ -46,6 +46,7 @@ class ClockOffsetEstimator:
         self._smoothed: float | None = None if initial_ms is None else float(initial_ms)
         self._raw: int | None = None
         self._drift = False
+        self._samples = 0
 
     def add_sample(self, server_time: datetime, sent_at: datetime, received_at: datetime) -> bool:
         """Feed one response; False if the sample was ignored."""
@@ -55,6 +56,7 @@ class ClockOffsetEstimator:
         midpoint = sent_at + (received_at - sent_at) / 2
         sample = (server_time - midpoint) / timedelta(milliseconds=1)
         with self._lock:
+            self._samples += 1
             self._raw = round(sample)
             if self._smoothed is None or abs(sample - self._smoothed) > self._reset_ms:
                 self._smoothed = sample
@@ -72,6 +74,12 @@ class ClockOffsetEstimator:
         """The smoothed offset; 0 before any sample."""
         with self._lock:
             return 0 if self._smoothed is None else round(self._smoothed)
+
+    @property
+    def samples(self) -> int:
+        """How many samples were accepted (a new one means a fresh measurement)."""
+        with self._lock:
+            return self._samples
 
     @property
     def raw_ms(self) -> int | None:

@@ -105,6 +105,11 @@ class PushedSessions:
             return self._live()
 
 
+def _nearest_minute(when: datetime) -> datetime:
+    floor = when.replace(second=0, microsecond=0)
+    return floor + timedelta(minutes=1) if when - floor >= timedelta(seconds=30) else floor
+
+
 BurstStatusKind = Literal["pending", "done", "unknown"]
 
 
@@ -202,6 +207,10 @@ class EngineEventRecorder:
       at a session change is not done (1.7 note).
 
     A queue failure loses that record only and is counted.
+
+    Times: the engine reports device time. `stamp` turns it into the
+    corrected UTC written to the records (contract 6); a bucket keeps a
+    whole-minute start, the corrected minute nearest to its device minute.
     """
 
     def __init__(
@@ -210,11 +219,14 @@ class EngineEventRecorder:
         sessions: PushedSessions,
         outcomes: OutcomeRegistry,
         clock: Clock,
+        *,
+        stamp: Callable[[datetime], datetime] | None = None,
     ) -> None:
         self._queue = queue
         self._sessions = sessions
         self._outcomes = outcomes
         self._clock = clock
+        self._stamp_fn = stamp
         self._lock = threading.Lock()
         self._open: dict[UUID, PushedSession] = {}
         self._waiting: dict[UUID, tuple[float, StateEpisode, PushedSession]] = {}
@@ -282,13 +294,14 @@ class EngineEventRecorder:
         image_ids: tuple[UUID, ...],
         withheld: ImagesWithheld,
     ) -> None:
+        started_at = self._stamp(episode.started_at)
         payload = AttentionEventPayload(
             kind=AttentionEventKind.STATE_EPISODE,
             state=episode.state,
             confidence=episode.confidence,
             low_confidence=episode.low_confidence,
-            started_at=episode.started_at,
-            ended_at=episode.ended_at,
+            started_at=started_at,
+            ended_at=None if episode.ended_at is None else self._stamp(episode.ended_at),
             session_id=session.session_id,
             user_id=session.user_id,
             signals=dict(episode.signals),
@@ -298,18 +311,29 @@ class EngineEventRecorder:
             images_withheld=withheld,
             image_ids=image_ids,
         )
-        self._enqueue(EventType.ATTENTION_EVENT, payload, episode.started_at, episode.id)
+        self._enqueue(EventType.ATTENTION_EVENT, payload, started_at, episode.id)
 
     def bucket_closed(self, bucket: StateBucket) -> None:
         """Queue the closed minute."""
         self._expire()
         session = self._sessions.current()
+        start = _nearest_minute(self._stamp(bucket.bucket_start))
         payload = BucketPayload(
-            bucket_start=bucket.bucket_start,
+            bucket_start=start,
             user_id=session.user_id if session is not None else None,
             seconds={AttentionState(k): v for k, v in bucket.seconds.items()},
         )
-        self._enqueue(EventType.BUCKET, payload, bucket.bucket_start + timedelta(minutes=1), None)
+        self._enqueue(EventType.BUCKET, payload, start + timedelta(minutes=1), None)
+
+    def _stamp(self, device_time: datetime) -> datetime:
+        if self._stamp_fn is None:
+            return device_time
+        try:
+            return self._stamp_fn(device_time)
+        except Exception as exc:
+            # Fail-open: device time is still a valid record time.
+            logger.error("record time not corrected (%s)", type(exc).__name__)
+            return device_time
 
     def _enqueue(
         self,
@@ -380,6 +404,11 @@ class StationChild:
     def health(self) -> EngineHealth:
         """Engine health."""
         return self.adapter.health()
+
+    def alive(self) -> bool:
+        """False while the engine's tick has stalled: the child stops its
+        heartbeat so the supervisor restarts it (`service.child`)."""
+        return self.adapter.alive()
 
     def set_session(self, session: PushedSession | None, ttl_s: float) -> None:
         """Replace the pushed session; a new session resets per-person baselines."""

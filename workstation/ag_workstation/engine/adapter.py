@@ -9,7 +9,15 @@
 - `health` maps the runtime health to `engine_api.EngineHealth`, with one
   summary per configured camera. A camera whose landmark model could not be
   loaded is reported offline (it produces no state) and `last_error` carries
-  a health flag code such as `model_unavailable`.
+  a health flag code such as `model_unavailable`. A running engine whose
+  tick has stalled (thread dead or hung: no tick for `unknown_seconds`, or
+  none at all `STARTUP_GRACE_S` after start) is `DOWN` with `tick_stalled`,
+  so monitoring is shown unavailable while the cameras still deliver.
+- `alive` is the engine child's liveness: False once the tick has stalled
+  for `TICK_STALL_RESTART_S` (or never ticked within the start-up grace).
+  The child then stops its heartbeat and the supervisor restarts it within
+  seconds (scope 4.4, PROGRESS 2.11 fix). Unconfigured, starting and
+  stopped engines are alive: a restart would not help them.
 - `apply_config` maps the engine's bool to `ConfigApplyResult` and never
   raises. With no engine yet (the child started without a camera config) the
   first accepted config builds and starts one.
@@ -81,6 +89,16 @@ FLAG_NOT_CONFIGURED: Final = "not_configured"
 FLAG_MODEL_UNAVAILABLE: Final = "model_unavailable"
 """A landmark model could not be loaded (missing file, bad AG_MODEL_DIR)."""
 FLAG_ENGINE_START_FAILED: Final = "engine_start_failed"
+FLAG_TICK_STALLED: Final = "tick_stalled"
+"""The engine runs but its tick thread stopped: the state is stale (Unknown)."""
+TICK_STALL_RESTART_S: Final = 3.0
+"""A tick this old makes the child stop heartbeating (the tick runs every
+0.1 s; 3 s leaves room for a scheduling hiccup without a false restart).
+With the supervisor's 2 s heartbeat timeout the restart follows about 5 s
+after the tick stopped."""
+STARTUP_GRACE_S: Final = 10.0
+"""A started engine must tick within this. Model loading happens before the
+engine counts as started, so this only covers thread start-up."""
 
 EngineBuilder = Callable[[EngineConfig], Engine]
 """Builds (does not start) an `Engine` for a config; wires the frame listener."""
@@ -144,6 +162,7 @@ class EngineAdapter:
         self._interval = pump_interval_s
         self._lock = threading.RLock()
         self._engine: Engine | None = None
+        self._engine_started_at = 0.0
         self._started = False
         self._start_failed = False
         self._stop = threading.Event()
@@ -208,6 +227,7 @@ class EngineAdapter:
             self._start_failed = True
             logger.error("engine could not start (%s)", type(exc).__name__)
             return False
+        self._engine_started_at = self._clock.monotonic()
         self._engine = engine
         self._start_failed = False
         return True
@@ -242,7 +262,7 @@ class EngineAdapter:
                 engine_version=self._version,
                 config_version=engine.config.config_version,
                 signals=_signals(candidates),
-                camera_states=self._camera_states(candidates),
+                camera_states=self._camera_states(candidates, live=True),
             )
         except Exception as exc:
             logger.error("scan state failed (%s)", type(exc).__name__)
@@ -265,7 +285,7 @@ class EngineAdapter:
                 engine_version=self._version,
                 config_version=engine.config.config_version,
                 signals=_signals(candidates),
-                camera_states=self._camera_states(candidates),
+                camera_states=self._camera_states(candidates, live=True),
             )
         except Exception as exc:
             logger.error("current state failed (%s)", type(exc).__name__)
@@ -276,22 +296,34 @@ class EngineAdapter:
         engine = self._engine
         return engine is not None and engine.status().state is AttentionState.ON_BREAK
 
-    def _camera_states(self, candidates: Iterable[CameraCandidate]) -> tuple[CameraState, ...]:
+    def _camera_states(
+        self, candidates: Iterable[CameraCandidate], *, live: bool = False
+    ) -> tuple[CameraState, ...]:
+        """Per-camera snapshots. `live` (a state answer now): a camera that is
+        not online is shown Unknown and unusable, as fusion already treats it,
+        instead of its last candidate (kept for up to `unknown_seconds`)."""
         statuses = dict(self._camera_status)
         out = []
         for c in sorted(candidates, key=lambda c: c.slot):
             if not 1 <= c.slot <= 4:
                 continue
+            status = statuses.get(c.slot, CameraStatus.ONLINE)
+            if live and status is not CameraStatus.ONLINE:
+                out.append(CameraState(slot=c.slot, status=status, state=AttentionState.UNKNOWN))
+                continue
             out.append(
                 CameraState(
                     slot=c.slot,
-                    status=statuses.get(c.slot, CameraStatus.ONLINE),
+                    status=status,
                     state=c.state,
                     quality=_unit(c.quality),
                     usable=c.usable,
                 )
             )
         return tuple(out)
+
+    def _online(self, slot: int) -> bool:
+        return self._camera_status.get(slot, CameraStatus.ONLINE) is CameraStatus.ONLINE
 
     # -- EngineHealthSource --------------------------------------------------
 
@@ -318,7 +350,18 @@ class EngineAdapter:
                     config_version=version,
                     last_error=flag,
                 )
-            return self._map_health(engine.health())
+            health = self._map_health(engine.health())
+            # Stale exactly when the state answers turn Unknown (`is_current`).
+            if self._stalled(engine, engine.config.thresholds.unknown_seconds):
+                return EngineHealth(
+                    status=EngineStatus.DOWN,
+                    cameras=health.cameras,
+                    restarts=health.restarts,
+                    engine_version=health.engine_version,
+                    config_version=health.config_version,
+                    last_error=FLAG_TICK_STALLED,
+                )
+            return health
         except Exception as exc:
             logger.error("engine health failed (%s)", type(exc).__name__)
             return EngineHealth(
@@ -327,6 +370,28 @@ class EngineAdapter:
                 config_version=version,
                 last_error=type(exc).__name__,
             )
+
+    def _stalled(self, engine: Engine, limit: float) -> bool:
+        """A running engine whose last tick is older than `limit`, or that has
+        not ticked at all within `STARTUP_GRACE_S` of its start."""
+        if not engine.running:
+            return False
+        age = engine.tick_age()
+        if age is None:
+            return self._clock.monotonic() - self._engine_started_at > STARTUP_GRACE_S
+        return age > limit
+
+    def alive(self) -> bool:
+        """False while the tick has stalled long enough to restart the child.
+
+        Never raises; a failing check answers True (a broken probe must not
+        restart a working child; `health` reports the failure)."""
+        try:
+            engine = self._engine
+            return engine is None or not self._stalled(engine, TICK_STALL_RESTART_S)
+        except Exception as exc:
+            logger.error("engine liveness check failed (%s)", type(exc).__name__)
+            return True
 
     def _map_health(self, rt: RuntimeHealth) -> EngineHealth:
         no_model = self._unavailable_slots()
@@ -419,7 +484,9 @@ class EngineAdapter:
             assembler.request_keyframe(event_id, trigger_ts, primary_slot=primary, triggered_at=at)
             return
         secondaries = tuple(
-            c.slot for c in engine.latest_candidates() if c.usable and c.slot != primary
+            c.slot
+            for c in engine.latest_candidates()
+            if c.usable and c.slot != primary and self._online(c.slot)
         )
         assembler.request_scan_burst(
             event_id,

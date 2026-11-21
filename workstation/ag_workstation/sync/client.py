@@ -196,7 +196,12 @@ class SyncClient:
         rng: Callable[[], float] | None = None,
         config: SyncConfig | None = None,
         on_config_applied: Callable[[ConfigBundle], None] | None = None,
+        on_offset: Callable[[int], object] | None = None,
     ) -> None:
+        """`on_offset` receives the smoothed offset after each round that
+        measured it (the service publishes it for the UI and the engine
+        child, `corrected_time`); it is not called while nothing is measured,
+        so an offset that goes stale is not refreshed."""
         self._api = api
         self._queue = queue
         self._config_store = config_store
@@ -209,6 +214,8 @@ class SyncClient:
         self._rng = rng or random.SystemRandom().random
         self._cfg = config or SyncConfig()
         self._on_config_applied = on_config_applied
+        self._on_offset = on_offset
+        self._published_samples = 0
         self._ids = Uuid7Generator(now=self._utc.now)
 
         self._heartbeat = _Channel("heartbeat")
@@ -244,6 +251,18 @@ class SyncClient:
             logger.exception("sync round failed (%s)", type(exc).__name__)
             self._flags.add(SyncFlag.SYNC_ERROR)
             return MAX_SLEEP_S
+        finally:
+            self._publish_offset()
+
+    def _publish_offset(self) -> None:
+        samples = self._offset.samples
+        if self._on_offset is None or samples == self._published_samples:
+            return
+        self._published_samples = samples
+        try:
+            self._on_offset(self._offset.smoothed_ms)
+        except Exception as exc:
+            logger.warning("clock offset listener failed (%s)", type(exc).__name__)
 
     def health(self) -> SyncHealth:
         """Current flags and figures."""

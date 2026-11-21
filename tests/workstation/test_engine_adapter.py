@@ -14,6 +14,9 @@ from ag_workstation.engine.adapter import (
     FLAG_ENGINE_START_FAILED,
     FLAG_MODEL_UNAVAILABLE,
     FLAG_NOT_CONFIGURED,
+    FLAG_TICK_STALLED,
+    STARTUP_GRACE_S,
+    TICK_STALL_RESTART_S,
     EngineAdapter,
 )
 from ag_workstation.engine.fakes import T0, StubFeed, engine_config, face_result, frame
@@ -404,5 +407,114 @@ def test_on_break_reads_the_engine_status() -> None:
     try:
         rig.run(1.0)
         assert not rig.adapter.on_break()
+    finally:
+        rig.adapter.stop()
+
+
+# -- a stalled tick is visible and stops the child's heartbeat (2.11 fix) ------------
+
+
+def test_a_stalled_tick_is_reported_down_and_not_alive() -> None:
+    """The tick thread died or hangs while the cameras still deliver: health
+    says DOWN (monitoring unavailable) once the state is stale, and the child
+    stops heartbeating after `TICK_STALL_RESTART_S`, so the supervisor
+    restarts it (scope 4.4)."""
+    rig = Rig()
+    rig.adapter.start()
+    try:
+        rig.run(3.0)
+        assert rig.adapter.alive()
+        assert rig.adapter.health().status is EngineStatus.RUNNING
+        unknown_s = rig.adapter.config.thresholds.unknown_seconds  # type: ignore[union-attr]  # configured rig
+        engine = rig.adapter.engine
+        assert engine is not None
+        # Frames keep arriving; nothing ticks.
+        for step in range(round(unknown_s * 10) + 1):
+            engine.process_frame(frame(1, 1000 + step, rig.clock.monotonic()))
+            rig.clock.advance(0.1)
+        health = rig.adapter.health()
+        assert health.status is EngineStatus.DOWN
+        assert health.last_error == FLAG_TICK_STALLED
+        assert not health.monitoring_available
+        assert {c.status for c in health.cameras} == {CameraStatus.ONLINE}  # cameras are fine
+        assert rig.adapter.alive()  # stale, but not yet long enough to restart
+        rig.clock.advance(TICK_STALL_RESTART_S)
+        assert not rig.adapter.alive()
+        # The tick comes back: healthy and alive again.
+        rig.run(0.5)
+        assert rig.adapter.alive()
+        assert rig.adapter.health().status is EngineStatus.RUNNING
+    finally:
+        rig.adapter.stop()
+
+
+def test_startup_and_unconfigured_engines_are_alive() -> None:
+    """No false restarts while the engine is unconfigured, loading, or about
+    to tick for the first time; an engine that never ticks is caught."""
+    rig = Rig(configured=False)
+    assert rig.adapter.alive()  # not started
+    rig.adapter.start()
+    try:
+        rig.clock.advance(60.0)
+        assert rig.adapter.alive()  # waiting for a config: restarting would not help
+        assert rig.adapter.health().last_error == FLAG_NOT_CONFIGURED
+        assert rig.adapter.apply_config(engine_config()).accepted
+        # Started, no tick yet: within the grace it is starting, not stalled.
+        rig.clock.advance(STARTUP_GRACE_S - 0.5)
+        assert rig.adapter.alive()
+        assert rig.adapter.health().last_error != FLAG_TICK_STALLED
+        rig.clock.advance(1.0)
+        assert not rig.adapter.alive()
+        assert rig.adapter.health().status is EngineStatus.DOWN
+        assert rig.adapter.health().last_error == FLAG_TICK_STALLED
+    finally:
+        rig.adapter.stop()
+    assert rig.adapter.alive()  # stopped on purpose: nothing to restart
+
+
+def test_alive_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = Rig()
+    rig.adapter.start()
+    try:
+        rig.run(1.0)
+        engine = rig.adapter.engine
+        assert engine is not None
+
+        def boom() -> float | None:
+            raise RuntimeError("bug")
+
+        monkeypatch.setattr(engine, "tick_age", boom)
+        assert rig.adapter.alive()  # a broken probe never kills a working child
+        health = rig.adapter.health()  # but health does not claim all is well
+        assert (health.status, health.last_error) == (EngineStatus.UNKNOWN, "RuntimeError")
+    finally:
+        rig.adapter.stop()
+
+
+def test_an_offline_camera_is_not_shown_usable_in_snapshots() -> None:
+    """For up to `unknown_seconds` after a camera drops, fusion already
+    ignores it; the camera snapshot must not still say usable with its last
+    state, and it is not asked for a secondary key frame."""
+    rig = Rig()
+    rig.adapter.start()
+    try:
+        rig.run(6.0)
+        rig.world.feeds[-1].status[2] = CameraStatus.OFFLINE
+        rig.run(0.3, slots=(1,))
+        state = rig.adapter.scan_state()
+        assert state.state is A.ATTENTIVE  # camera 1 carries the station
+        by_slot = {c.slot: c for c in state.camera_states}
+        assert by_slot[1].usable and by_slot[1].status is CameraStatus.ONLINE
+        dropped = by_slot[2]
+        assert dropped.status is CameraStatus.OFFLINE
+        assert dropped.state is A.UNKNOWN
+        assert not dropped.usable
+        assert dropped.quality is None
+        current = {c.slot: c for c in rig.adapter.current_state().camera_states}
+        assert not current[2].usable and current[2].state is A.UNKNOWN
+        rig.adapter.request_burst(EVENT, BurstKind.SCAN_WARNING, state.ts)
+        rig.run(2.0, slots=(1,))
+        (burst,) = [b for b in rig.sink.bursts if b.event_id == EVENT]
+        assert {f.camera_slot for f in burst.frames} == {1}
     finally:
         rig.adapter.stop()
