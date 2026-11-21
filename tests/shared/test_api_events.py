@@ -10,6 +10,7 @@ from ag_shared.api import (
     BatchResult,
     BucketItem,
     DisputeItem,
+    DisputeReasonCode,
     EventBatch,
     EventType,
     HealthItem,
@@ -17,6 +18,7 @@ from ag_shared.api import (
     ItemStatus,
     LocalAlertItem,
     LocalAlertKind,
+    LoginFailureItem,
     RawEventBatch,
     ScanItem,
     SessionEndItem,
@@ -63,6 +65,7 @@ PAYLOADS: dict[str, dict[str, object]] = {
     "dispute": {"attention_event_id": str(U), "user_id": str(U), "message": "I was reading"},
     "health": {"engine_status": "running", "cpu_pct": 30, "dead_letter_count": 2},
     "local_alert": {"kind": "disk_full", "detail": {"free_mb": 10}},
+    "login_failure": {"method": "employee_id_pin", "user_id": str(U), "known_worker": True},
 }
 
 ITEM_CLASSES = {
@@ -74,6 +77,7 @@ ITEM_CLASSES = {
     "dispute": DisputeItem,
     "health": HealthItem,
     "local_alert": LocalAlertItem,
+    "login_failure": LoginFailureItem,
 }
 
 
@@ -158,6 +162,9 @@ def test_unknown_enum_values_inside_payloads_get_safe_defaults() -> None:
         ("session_start", {"user_id": str(U), "method": "supervisor_assigned"}),
         ("dispute", {"attention_event_id": str(U), "user_id": str(U), "message": ""}),
         ("scan", {**PAYLOADS["scan"], "barcode": "x" * 5000}),
+        ("login_failure", {"method": "employee_id_pin", "user_id": None}),
+        ("login_failure", {"method": "", "user_id": None, "known_worker": False}),
+        ("login_failure", {"method": "employee_id_pin", "user_id": "EMP001", "known_worker": True}),
     ],
 )
 def test_invalid_items_are_refused(kind: str, payload: dict[str, object]) -> None:
@@ -230,3 +237,111 @@ def test_batch_result_statuses() -> None:
         ItemStatus.RETRY_LATER,  # unknown: keep the record and retry
     ]
     assert [s.deletes_record for s in statuses] == [True, True, False, False, False]
+
+
+# -- 3.1b: owner-approved contract changes (2026-11-21) ---------------------------
+
+
+def test_login_failure_names_the_matched_worker_or_none() -> None:
+    known = parse_event_item(_item("login_failure"))
+    assert isinstance(known, LoginFailureItem)
+    assert known.payload.method == "employee_id_pin"
+    assert known.payload.user_id == U
+    assert known.payload.known_worker is True
+    assert known.payload.locked is False
+    unknown = parse_event_item(
+        _item(
+            "login_failure",
+            {"method": "employee_id_pin", "user_id": None, "known_worker": False, "locked": True},
+        )
+    )
+    assert isinstance(unknown, LoginFailureItem)
+    assert unknown.payload.user_id is None
+    assert unknown.payload.known_worker is False
+    assert unknown.payload.locked is True
+    # A login method this side does not know is still a failure to audit, not a reject.
+    face = parse_event_item(
+        _item("login_failure", {"method": "face_match", "user_id": None, "known_worker": False})
+    )
+    assert isinstance(face, LoginFailureItem)
+    assert face.payload.method == "face_match"
+    # No field for what was typed exists: unknown fields are ignored, never kept.
+    typed = parse_event_item(
+        _item(
+            "login_failure",
+            {
+                "method": "employee_id_pin",
+                "user_id": None,
+                "known_worker": False,
+                "employee_id": "4829",
+            },
+        )
+    )
+    assert "4829" not in typed.model_dump_json()
+
+
+def test_login_failure_is_processed_after_the_session_records() -> None:
+    assert INGEST_ORDER.index(EventType.LOGIN_FAILURE) > INGEST_ORDER.index(EventType.SESSION_END)
+
+
+def test_images_withheld_on_break_round_trips() -> None:
+    event = parse_event_item(
+        _item(
+            "attention_event",
+            {**PAYLOADS["attention_event"], "images_withheld": "on_break", "image_ids": []},
+        )
+    )
+    assert isinstance(event, AttentionEventItem)
+    assert event.payload.images_withheld is ImagesWithheld.ON_BREAK
+    assert {v.value for v in ImagesWithheld} == {
+        "none",
+        "no_consent",
+        "no_worker",
+        "on_break",
+        "disk_full",
+    }
+
+
+@pytest.mark.parametrize(
+    ("wire", "reason"),
+    [
+        ("assignment_expired", SessionEndReason.ASSIGNMENT_EXPIRED),
+        ("supervisor_ended", SessionEndReason.SUPERVISOR_ENDED),
+    ],
+)
+def test_new_session_end_reasons_parse(wire: str, reason: SessionEndReason) -> None:
+    end = parse_event_item(_item("session_end", {"session_id": str(U), "end_reason": wire}))
+    assert isinstance(end, SessionEndItem)
+    assert end.payload.end_reason is reason
+
+
+def test_session_end_reasons_match_the_schema() -> None:
+    assert {v.value for v in SessionEndReason} == {
+        "logout",
+        "timeout",
+        "shift_end",
+        "replaced",
+        "assignment_expired",
+        "supervisor_ended",
+    }
+
+
+def test_dispute_reason_code_is_optional_and_lenient() -> None:
+    plain = parse_event_item(_item("dispute"))
+    assert isinstance(plain, DisputeItem)
+    assert plain.payload.reason is None
+    for code in DisputeReasonCode:
+        coded = parse_event_item(_item("dispute", {**PAYLOADS["dispute"], "reason": code.value}))
+        assert isinstance(coded, DisputeItem)
+        assert coded.payload.reason is code
+        assert parse_event_item(coded.model_dump(mode="json")) == coded
+    future = parse_event_item(_item("dispute", {**PAYLOADS["dispute"], "reason": "aliens"}))
+    assert isinstance(future, DisputeItem)
+    assert future.payload.reason is DisputeReasonCode.OTHER
+    assert {v.value for v in DisputeReasonCode} == {
+        "was_attentive",
+        "camera_view",
+        "on_break",
+        "other_task",
+        "other",
+    }

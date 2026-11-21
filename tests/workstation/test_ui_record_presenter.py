@@ -8,7 +8,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from ag_shared.api import AttentionEventKind, SessionMethod
+from ag_shared.api import AttentionEventKind, DisputeReasonCode, SessionMethod
 from ag_shared.i18n import Translator
 from ag_shared.ids import new_uuid7
 from ag_shared.states import AttentionState, ScanOutcome
@@ -134,11 +134,19 @@ class Source:
 @dataclass
 class Disputes:
     calls: list[tuple[UUID, UUID, str]] = field(default_factory=list)
+    codes: list[DisputeReasonCode | None] = field(default_factory=list)
     outcome: DisputeOutcome = DisputeOutcome.QUEUED
     on_submit: Callable[[UUID], None] | None = None
 
-    def submit(self, user_id: UUID, attention_event_id: UUID, message: str) -> DisputeResult:
+    def submit(
+        self,
+        user_id: UUID,
+        attention_event_id: UUID,
+        message: str,
+        reason: DisputeReasonCode | None = None,
+    ) -> DisputeResult:
         self.calls.append((user_id, attention_event_id, message))
+        self.codes.append(reason)
         if self.on_submit is not None:
             self.on_submit(attention_event_id)
         return DisputeResult(self.outcome, new_uuid7())
@@ -360,6 +368,8 @@ def test_dispute_is_submitted_once_with_the_english_reason(rig: Rig) -> None:
     assert vm.busy and vm.message_text == "Sending..." and not vm.can_submit
     rig.runner.run()
     assert rig.disputes.calls == [(ASHA, event_id, "The camera could not see me properly.")]
+    # 3.1b (owner decision 1d): the chosen reason also travels as the contract's code.
+    assert rig.disputes.codes == [DisputeReasonCode.CAMERA_VIEW]
     vm = rig.presenter.tick()
     assert not vm.busy and not vm.dispute_open
     assert vm.message_text == TR.t("ui.record.dispute.sent")
@@ -599,3 +609,12 @@ def test_app_without_a_record_presenter(rig: Rig, clock: FakeClock) -> None:
     vm = app.tick()
     assert vm.screen is Screen.SCAN and vm.record is None and not vm.record_available
     app.close_record()
+
+
+def test_every_screen_reason_has_a_contract_code() -> None:
+    """3.1b: each touchscreen reason maps to its own `DisputeReasonCode`."""
+    codes = [r.code for r in DisputeReason]
+    assert all(isinstance(c, DisputeReasonCode) for c in codes)
+    assert len(set(codes)) == len(codes)
+    assert DisputeReasonCode.OTHER not in codes  # reserved for values this side does not know
+    assert [c.value for c in codes] == [r.value for r in DisputeReason]

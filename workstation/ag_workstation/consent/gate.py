@@ -13,8 +13,8 @@ written. It is open only when, at decision time:
    `no_consent`. Q5: such a worker works normally, metadata only;
 4. the station is not on break: no scheduled break of the bundle's shifts
    (site timezone) overlaps the span from the burst's first frame to now,
-   and the optional engine signal does not report On Break. On break maps
-   to `no_worker` (the wire enum has no `on_break`).
+   and the optional engine signal does not report On Break; otherwise
+   `on_break` (its own wire value since schema revision 2).
 
 Any exception while deciding closes the gate (`no_consent`): failing safe
 for privacy never touches the scan path, which does not wait on the gate.

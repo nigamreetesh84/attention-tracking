@@ -31,9 +31,8 @@ _WITHHELD: Final[dict[GateReason, ImagesWithheld]] = {
     GateReason.NO_SESSION: ImagesWithheld.NO_WORKER,
     GateReason.SESSION_CHANGED: ImagesWithheld.NO_WORKER,
     GateReason.NO_CONSENT: ImagesWithheld.NO_CONSENT,
-    # The wire enum has no on_break value; the worker is not at work, and no
-    # worker's consent covers the frames: closest is no_worker.
-    GateReason.ON_BREAK: ImagesWithheld.NO_WORKER,
+    # Own wire value since schema revision 2 (owner decision 2026-11-21).
+    GateReason.ON_BREAK: ImagesWithheld.ON_BREAK,
     # Consent could not be established.
     GateReason.ERROR: ImagesWithheld.NO_CONSENT,
 }

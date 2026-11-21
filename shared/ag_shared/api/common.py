@@ -34,7 +34,7 @@ from pydantic import (
 
 logger = logging.getLogger("ag_shared.api")
 
-SCHEMA_REVISION: Final = 1
+SCHEMA_REVISION: Final = 2
 """Payload schema revision within API major version 1 (header `X-AG-Schema`).
 
 Bump it for every change to an API model's JSON schema; the snapshot test in

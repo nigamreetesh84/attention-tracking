@@ -41,7 +41,7 @@ from types import TracebackType
 from typing import Final, Self
 from uuid import UUID
 
-from ag_shared.api import AttentionEventKind, AttentionEventPayload
+from ag_shared.api import AttentionEventKind, AttentionEventPayload, DisputeReasonCode
 from ag_shared.states import AttentionState, ScanOutcome
 from pydantic import JsonValue
 
@@ -152,6 +152,17 @@ class DisputeRecord:
     message: str
     created_at: datetime
     status: DisputeStatus
+    reason: DisputeReasonCode | None = None
+    """Optional contract reason code (schema revision 2); rows saved before it have none."""
+
+
+def _reason_code(value: object) -> DisputeReasonCode | None:
+    if value is None:
+        return None
+    try:
+        return DisputeReasonCode(str(value))
+    except ValueError:
+        return DisputeReasonCode.OTHER
 
 
 def _ms(value: datetime) -> int:
@@ -481,6 +492,7 @@ class PersonalRecordStore:
         user_id: UUID,
         message: str,
         created_at: datetime,
+        reason: DisputeReasonCode | None = None,
     ) -> tuple[DisputeRecord, bool]:
         """Save a dispute for the event unless one exists; returns the saved
         dispute (the existing one if there was one) and whether it is new."""
@@ -494,9 +506,14 @@ class PersonalRecordStore:
             if existing is not None:
                 return self._dispute(eid, *existing), False
             did = str(dispute_id)
-            nonce, sealed = self._seal(
-                "dispute", did, {"user_id": str(user_id), "message": message, "event": eid}
-            )
+            content: dict[str, JsonValue] = {
+                "user_id": str(user_id),
+                "message": message,
+                "event": eid,
+            }
+            if reason is not None:
+                content["reason"] = reason.value
+            nonce, sealed = self._seal("dispute", did, content)
             conn.execute(
                 "INSERT INTO record_dispute "
                 "(attention_event_id, id, created_at, status, nonce, payload) "
@@ -511,6 +528,7 @@ class PersonalRecordStore:
                 message=message,
                 created_at=_dt(_ms(created_at)),
                 status=DisputeStatus.PENDING,
+                reason=reason,
             ),
             True,
         )
@@ -528,6 +546,7 @@ class PersonalRecordStore:
             message=str(data["message"]),
             created_at=_dt(created),
             status=DisputeStatus(status),
+            reason=_reason_code(data.get("reason")),
         )
 
     def mark_dispute_queued(self, dispute_id: UUID) -> None:

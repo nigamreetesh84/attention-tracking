@@ -1,5 +1,5 @@
 {
- "schema_revision": 1,
+ "schema_revision": 2,
  "schemas": {
   "BatchResult": {
    "$defs": {
@@ -1739,6 +1739,17 @@
        "title": "Message",
        "type": "string"
       },
+      "reason": {
+       "anyOf": [
+        {
+         "$ref": "#/$defs/DisputeReasonCode"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null
+      },
       "user_id": {
        "format": "uuid",
        "title": "User Id",
@@ -1752,6 +1763,18 @@
      ],
      "title": "DisputePayload",
      "type": "object"
+    },
+    "DisputeReasonCode": {
+     "description": "Optional reason code on a dispute (`dispute.reason`, revision 2).\n\nThe values are the fixed choices of the workstation's \"My record\" screen,\nso false-positive statistics can be counted by reason (scope 6).",
+     "enum": [
+      "was_attentive",
+      "camera_view",
+      "on_break",
+      "other_task",
+      "other"
+     ],
+     "title": "DisputeReasonCode",
+     "type": "string"
     },
     "EngineStatus": {
      "description": "Status of the detection engine process (PLAN 1.8, 2.3).",
@@ -1900,6 +1923,7 @@
       "none",
       "no_consent",
       "no_worker",
+      "on_break",
       "disk_full"
      ],
      "title": "ImagesWithheld",
@@ -1974,6 +1998,82 @@
       "kind"
      ],
      "title": "LocalAlertPayload",
+     "type": "object"
+    },
+    "LoginFailureItem": {
+     "description": "`login_failure` item.",
+     "properties": {
+      "id": {
+       "format": "uuid",
+       "title": "Id",
+       "type": "string"
+      },
+      "occurred_at": {
+       "format": "date-time",
+       "title": "Occurred At",
+       "type": "string"
+      },
+      "payload": {
+       "$ref": "#/$defs/LoginFailurePayload"
+      },
+      "seq": {
+       "minimum": 0,
+       "title": "Seq",
+       "type": "integer"
+      },
+      "type": {
+       "const": "login_failure",
+       "default": "login_failure",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "id",
+      "seq",
+      "occurred_at",
+      "payload"
+     ],
+     "title": "LoginFailureItem",
+     "type": "object"
+    },
+    "LoginFailurePayload": {
+     "description": "A failed worker login on the station (revision 2), for the server audit log.\n\nNever carries what was typed: an unknown employee ID is often a PIN typed\ninto the ID field. `occurred_at` is the time of the attempt.",
+     "properties": {
+      "known_worker": {
+       "title": "Known Worker",
+       "type": "boolean"
+      },
+      "locked": {
+       "default": false,
+       "title": "Locked",
+       "type": "boolean"
+      },
+      "method": {
+       "maxLength": 64,
+       "minLength": 1,
+       "title": "Method",
+       "type": "string"
+      },
+      "user_id": {
+       "anyOf": [
+        {
+         "format": "uuid",
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "User Id"
+      }
+     },
+     "required": [
+      "method",
+      "known_worker"
+     ],
+     "title": "LoginFailurePayload",
      "type": "object"
     },
     "ScanItem": {
@@ -2148,7 +2248,9 @@
       "logout",
       "timeout",
       "shift_end",
-      "replaced"
+      "replaced",
+      "assignment_expired",
+      "supervisor_ended"
      ],
      "title": "SessionEndReason",
      "type": "string"
@@ -2317,6 +2419,9 @@
        },
        {
         "$ref": "#/$defs/LocalAlertItem"
+       },
+       {
+        "$ref": "#/$defs/LoginFailureItem"
        },
        {
         "$ref": "#/$defs/UnknownEventItem"

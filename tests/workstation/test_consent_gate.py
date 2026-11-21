@@ -279,7 +279,8 @@ def test_engine_on_break_is_closed(sessions: Sessions, roster: StaticRosterSourc
         engine_on_break=lambda: flag["on"],
     )  # fmt: skip
     assert gate.decide(burst()).reason is GateReason.ON_BREAK
-    assert gate.decide(burst()).images_withheld is ImagesWithheld.NO_WORKER
+    # 3.1b (owner decision 1b): was no_worker.
+    assert gate.decide(burst()).images_withheld is ImagesWithheld.ON_BREAK
     flag["on"] = False
     assert gate.decide(burst()).open
 
@@ -315,6 +316,7 @@ def test_burst_whose_frames_reach_into_a_break_is_closed(
     clock_at(clock, LUNCH_START + timedelta(seconds=2))
     b = burst(at=LUNCH_START - timedelta(seconds=5))  # starts before, ends in the break
     assert gate.decide(b).reason is GateReason.ON_BREAK
+    assert gate.decide(b).images_withheld is ImagesWithheld.ON_BREAK
 
 
 def test_overnight_shift_break_after_midnight(
@@ -579,7 +581,8 @@ def test_permit_issue_failure_closes(gate: CaptureGate, monkeypatch: pytest.Monk
         (GateReason.NO_SESSION, ImagesWithheld.NO_WORKER),
         (GateReason.SESSION_CHANGED, ImagesWithheld.NO_WORKER),
         (GateReason.NO_CONSENT, ImagesWithheld.NO_CONSENT),
-        (GateReason.ON_BREAK, ImagesWithheld.NO_WORKER),
+        # 3.1b (owner decision 1b): breaks have their own wire value (was no_worker).
+        (GateReason.ON_BREAK, ImagesWithheld.ON_BREAK),
         (GateReason.ERROR, ImagesWithheld.NO_CONSENT),
     ],
 )

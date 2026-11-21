@@ -38,8 +38,7 @@ from ag_shared.api import (
     ConfigBundle,
     EndSessionCommand,
     EventType,
-    LocalAlertKind,
-    LocalAlertPayload,
+    LoginFailurePayload,
     RosterEntry,
     SessionEndPayload,
     SessionEndReason,
@@ -47,7 +46,7 @@ from ag_shared.api import (
     SessionStartPayload,
 )
 from ag_shared.ids import Uuid7Generator
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel
 
 from ag_workstation.auth.messages import MessageKey
 from ag_workstation.auth.methods import AuthOutcome, LoginMethodRegistry, LoginRequest
@@ -92,16 +91,15 @@ class EndCause(StrEnum):
 
     @property
     def wire_reason(self) -> SessionEndReason:
-        """The `worker_session.end_reason` value (schema: logout, timeout, shift_end, replaced)."""
+        """The `worker_session.end_reason` value (`SessionEndReason`)."""
         return _WIRE_REASON[self]
 
 
 _WIRE_REASON: Final = {
     EndCause.LOGOUT: SessionEndReason.LOGOUT,
     EndCause.REPLACED: SessionEndReason.REPLACED,
-    EndCause.ASSIGNMENT_EXPIRED: SessionEndReason.TIMEOUT,
-    # A supervisor ending the session from the console is a logout on their behalf.
-    EndCause.END_SESSION_COMMAND: SessionEndReason.LOGOUT,
+    EndCause.ASSIGNMENT_EXPIRED: SessionEndReason.ASSIGNMENT_EXPIRED,
+    EndCause.END_SESSION_COMMAND: SessionEndReason.SUPERVISOR_ENDED,
     EndCause.SHUTDOWN: SessionEndReason.LOGOUT,
     EndCause.RECOVERED: SessionEndReason.TIMEOUT,
     EndCause.SHIFT_END: SessionEndReason.SHIFT_END,
@@ -474,26 +472,21 @@ class SessionManager:
     ) -> None:
         """Queue failed logins and lockouts for the server audit (security-privacy 3).
 
-        Contract 4.3 has no login event type, so this is a `local_alert` of
-        kind `other` (2.R decision; proposal: a `login_failure` type). It
-        names the roster user the typed ID matched, or none: the typed text
-        itself never leaves the station, because an unknown ID is often a
-        PIN typed into the ID field (never log PINs)."""
+        A contract `login_failure` item (schema revision 2). It names the
+        roster user the typed ID matched, or none: the typed text itself
+        never leaves the station, because an unknown ID is often a PIN typed
+        into the ID field (never log PINs). The attempt that locks the ID is
+        marked `locked`; attempts refused while locked are not repeated."""
         if outcome is AuthOutcome.LOCKED and not newly_locked:
             return
-        event = "worker_login_locked" if newly_locked else "worker_login_failed"
-        detail: dict[str, JsonValue] = {
-            "event": event,
-            "method": method,
-            "user_id": None if user_id is None else str(user_id),
-            "known_worker": user_id is not None,
-        }
+        payload = LoginFailurePayload(
+            method=method,
+            user_id=user_id,
+            known_worker=user_id is not None,
+            locked=newly_locked,
+        )
         with self._lock:
-            self._write(
-                EventType.LOCAL_ALERT,
-                LocalAlertPayload(kind=LocalAlertKind.OTHER, detail=detail),
-                self._utc.now(),
-            )
+            self._write(EventType.LOGIN_FAILURE, payload, self._utc.now())
 
     def _set_open(self, row: OpenSessionRow | None) -> None:
         try:

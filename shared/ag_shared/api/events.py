@@ -51,6 +51,8 @@ class EventType(StrEnum):
     DISPUTE = "dispute"
     HEALTH = "health"
     LOCAL_ALERT = "local_alert"
+    LOGIN_FAILURE = "login_failure"
+    """Added in schema revision 2 (owner decision 2026-11-21)."""
 
 
 INGEST_ORDER: Final[tuple[EventType, ...]] = (
@@ -62,6 +64,7 @@ INGEST_ORDER: Final[tuple[EventType, ...]] = (
     EventType.DISPUTE,
     EventType.HEALTH,
     EventType.LOCAL_ALERT,
+    EventType.LOGIN_FAILURE,
 )
 """Dependency order for processing a batch (contract 5.3: session, scan,
 event, the rest). Session end follows the scans and events of its session."""
@@ -81,6 +84,10 @@ class SessionEndReason(StrEnum):
     TIMEOUT = "timeout"
     SHIFT_END = "shift_end"
     REPLACED = "replaced"
+    ASSIGNMENT_EXPIRED = "assignment_expired"
+    """A supervisor assignment reached its `valid_until` (revision 2)."""
+    SUPERVISOR_ENDED = "supervisor_ended"
+    """A supervisor ended the session from the console (`end_session` command; revision 2)."""
 
 
 class AttentionEventKind(StrEnum):
@@ -96,6 +103,8 @@ class ImagesWithheld(StrEnum):
     NONE = "none"
     NO_CONSENT = "no_consent"
     NO_WORKER = "no_worker"
+    ON_BREAK = "on_break"
+    """The frames fall in a scheduled break or the engine reports On Break (revision 2)."""
     DISK_FULL = "disk_full"
 
 
@@ -111,10 +120,29 @@ class LocalAlertKind(StrEnum):
     """Default for kinds this side does not know."""
 
 
+class DisputeReasonCode(StrEnum):
+    """Optional reason code on a dispute (`dispute.reason`, revision 2).
+
+    The values are the fixed choices of the workstation's "My record" screen,
+    so false-positive statistics can be counted by reason (scope 6)."""
+
+    WAS_ATTENTIVE = "was_attentive"
+    """The worker says they were paying attention."""
+    CAMERA_VIEW = "camera_view"
+    """The camera could not see the worker properly."""
+    ON_BREAK = "on_break"
+    """The worker was on a break."""
+    OTHER_TASK = "other_task"
+    """The worker was doing another part of the job."""
+    OTHER = "other"
+    """Default for codes this side does not know."""
+
+
 # Safe defaults for unknown enum values (contract section 2). Session method
 # and end reason only label a record, so any member is harmless; an unknown
 # scan outcome becomes `unmonitored` (no warning is implied); an unknown
-# withheld reason becomes `none` because `image_ids` stays authoritative.
+# withheld reason becomes `none` because `image_ids` stays authoritative; an
+# unknown dispute reason becomes `other` (the dispute itself is never lost).
 WireSessionMethod = Annotated[
     SessionMethod, BeforeValidator(lenient_enum(SessionMethod, SessionMethod.EMPLOYEE_ID_PIN))
 ]
@@ -133,6 +161,9 @@ WireImagesWithheld = Annotated[
 ]
 WireLocalAlertKind = Annotated[
     LocalAlertKind, BeforeValidator(lenient_enum(LocalAlertKind, LocalAlertKind.OTHER))
+]
+WireDisputeReason = Annotated[
+    DisputeReasonCode, BeforeValidator(lenient_enum(DisputeReasonCode, DisputeReasonCode.OTHER))
 ]
 
 SignalSnapshot = dict[Annotated[str, Field(max_length=64)], float | None]
@@ -242,6 +273,8 @@ class DisputePayload(ApiModel):
     attention_event_id: UUID
     user_id: UUID
     message: Annotated[str, Field(min_length=1, max_length=2000)]
+    reason: WireDisputeReason | None = None
+    """Optional reason code (revision 2); `message` stays the text reviewers read."""
 
 
 class HealthPayload(ApiModel):
@@ -264,6 +297,24 @@ class LocalAlertPayload(ApiModel):
 
     kind: WireLocalAlertKind
     detail: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class LoginFailurePayload(ApiModel):
+    """A failed worker login on the station (revision 2), for the server audit log.
+
+    Never carries what was typed: an unknown employee ID is often a PIN typed
+    into the ID field. `occurred_at` is the time of the attempt."""
+
+    method: Annotated[str, Field(min_length=1, max_length=64)]
+    """The login method's name (`employee_id_pin`); free text because login
+    methods are plug-ins and a failure with a newer method must still be audited."""
+    user_id: UUID | None = None
+    """The roster user the typed ID matched (active or not), else null."""
+    known_worker: bool
+    """Whether the typed ID matched a roster user."""
+    locked: bool = False
+    """This failure locked the ID on this station (security-privacy 3 audits
+    lockouts). Additive field beyond the contract's main fields."""
 
 
 class _ItemBase(ApiModel):
@@ -329,6 +380,13 @@ class LocalAlertItem(_ItemBase):
     payload: LocalAlertPayload
 
 
+class LoginFailureItem(_ItemBase):
+    """`login_failure` item."""
+
+    type: Literal["login_failure"] = "login_failure"
+    payload: LoginFailurePayload
+
+
 class UnknownEventItem(_ItemBase):
     """An item type this side does not know; the server answers `rejected`."""
 
@@ -360,6 +418,7 @@ EventItem = Annotated[
     | Annotated[DisputeItem, Tag("dispute")]
     | Annotated[HealthItem, Tag("health")]
     | Annotated[LocalAlertItem, Tag("local_alert")]
+    | Annotated[LoginFailureItem, Tag("login_failure")]
     | Annotated[UnknownEventItem, Tag("unknown")],
     Discriminator(_item_tag),
 ]

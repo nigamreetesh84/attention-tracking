@@ -26,7 +26,7 @@ from ag_shared.api import (
     ConfigBundle,
     EndSessionCommand,
     EventType,
-    LocalAlertPayload,
+    LoginFailurePayload,
     SessionEndItem,
     SessionEndPayload,
     SessionEndReason,
@@ -248,11 +248,17 @@ def _login(rig: AuthRig, employee_id: str, pin: str) -> Any:  # Any: LoginResult
     return rig.manager.login(PIN_METHOD_NAME, PinCredentials(employee_id, pin))
 
 
-def _alerts(rig: AuthRig) -> list[dict[str, Any]]:  # Any: free-form alert detail
+def _alerts(rig: AuthRig) -> list[dict[str, Any]]:  # Any: JSON of the payload
+    """Failed-login audit records, as the server receives them.
+
+    3.1b (owner decision 1a): these are `login_failure` items now; before,
+    they were `local_alert` items of kind `other` with the same facts in
+    `detail`. Login never writes a `local_alert` any more."""
+    assert rig.records.of_type(EventType.LOCAL_ALERT) == []
     out = []
-    for rec in rig.records.of_type(EventType.LOCAL_ALERT):
-        assert isinstance(rec.payload, LocalAlertPayload)
-        out.append(dict(rec.payload.detail))
+    for rec in rig.records.of_type(EventType.LOGIN_FAILURE):
+        assert isinstance(rec.payload, LoginFailurePayload)
+        out.append(rec.payload.model_dump(mode="json"))
     return out
 
 
@@ -306,10 +312,10 @@ def test_wrong_pin_is_a_generic_failure(rig: AuthRig) -> None:
     # 2.R H5: the roster user id of a known worker, never the typed text.
     assert _alerts(rig) == [
         {
-            "event": "worker_login_failed",
             "method": PIN_METHOD_NAME,
             "user_id": str(W1),
             "known_worker": True,
+            "locked": False,
         }
     ]
 
@@ -459,8 +465,8 @@ def test_lockout_after_five_failures_and_expiry(rig: AuthRig) -> None:
     assert len(_alerts(rig)) == alerts_before
     rig.clock.advance(1)
     assert _login(rig, "EMP001", "1234").outcome is AuthOutcome.SUCCESS
-    events = [a["event"] for a in _alerts(rig)]
-    assert events == ["worker_login_failed"] * 4 + ["worker_login_locked"]
+    events = [a["locked"] for a in _alerts(rig)]
+    assert events == [False] * 4 + [True]
 
 
 def test_lockout_is_per_employee_id(rig: AuthRig) -> None:
@@ -915,8 +921,9 @@ def test_assignment_expires(rig: AuthRig) -> None:
     assert rig.manager.current() is None
     (end,) = rig.records.of_type(EventType.SESSION_END)
     assert end.occurred_at == command.valid_until
+    # 3.1b (owner decision 1c): was timeout.
     assert end.payload == SessionEndPayload(
-        session_id=session.session_id, end_reason=SessionEndReason.TIMEOUT
+        session_id=session.session_id, end_reason=SessionEndReason.ASSIGNMENT_EXPIRED
     )
 
 
@@ -966,8 +973,11 @@ def test_end_session_command(rig: AuthRig) -> None:
     command = EndSessionCommand(id=new_uuid7(), session_id=session.session_id)
     assert rig.manager.handle_end_session(command) is CommandOutcome.ENDED
     assert rig.manager.current() is None
+    # 3.1b (owner decision 1c): was logout.
     assert _ends(rig) == [
-        SessionEndPayload(session_id=session.session_id, end_reason=SessionEndReason.LOGOUT)
+        SessionEndPayload(
+            session_id=session.session_id, end_reason=SessionEndReason.SUPERVISOR_ENDED
+        )
     ]
     assert _absent(rig.engine.config) == STATION_ABSENT
     assert rig.manager.handle_end_session(command) is CommandOutcome.DUPLICATE
@@ -1067,10 +1077,24 @@ def test_store_rejects_a_newer_database(tmp_path: Path) -> None:
 
 
 def test_end_cause_maps_every_member_to_the_schema() -> None:
-    allowed = {"logout", "timeout", "shift_end", "replaced"}
+    allowed = {
+        "logout",
+        "timeout",
+        "shift_end",
+        "replaced",
+        "assignment_expired",
+        "supervisor_ended",
+    }
     assert {cause.wire_reason.value for cause in EndCause} <= allowed
-    assert EndCause.ASSIGNMENT_EXPIRED.wire_reason is SessionEndReason.TIMEOUT
+    # 3.1b (owner decision 1c): were timeout and logout before the contract had these.
+    assert EndCause.ASSIGNMENT_EXPIRED.wire_reason is SessionEndReason.ASSIGNMENT_EXPIRED
+    assert EndCause.END_SESSION_COMMAND.wire_reason is SessionEndReason.SUPERVISOR_ENDED
     assert EndCause.REPLACED.wire_reason is SessionEndReason.REPLACED
+    assert EndCause.LOGOUT.wire_reason is SessionEndReason.LOGOUT
+    assert EndCause.SHUTDOWN.wire_reason is SessionEndReason.LOGOUT
+    assert EndCause.RECOVERED.wire_reason is SessionEndReason.TIMEOUT
+    assert EndCause.TIMEOUT.wire_reason is SessionEndReason.TIMEOUT
+    assert EndCause.SHIFT_END.wire_reason is SessionEndReason.SHIFT_END
 
 
 def test_explicit_end_cause(rig: AuthRig) -> None:
@@ -1157,15 +1181,15 @@ def test_failed_login_audit_for_an_unknown_id_carries_no_typed_text(
     for _ in range(5):
         _login(rig, typed, "0000")
     alerts = _alerts(rig)
-    assert [a["event"] for a in alerts] == ["worker_login_failed"] * 4 + ["worker_login_locked"]
+    assert [a["locked"] for a in alerts] == [False] * 4 + [True]
     for alert in alerts:
         assert alert == {
-            "event": alert["event"],
             "method": PIN_METHOD_NAME,
             "user_id": None,
             "known_worker": False,
+            "locked": alert["locked"],
         }
-    for rec in rig.records.of_type(EventType.LOCAL_ALERT):
+    for rec in rig.records.of_type(EventType.LOGIN_FAILURE):
         assert typed.casefold() not in rec.payload.model_dump_json().casefold()
 
 
@@ -1173,9 +1197,9 @@ def test_failed_login_audit_for_an_inactive_worker_names_the_account(rig: AuthRi
     _login(rig, "EMP003", "9999")
     assert _alerts(rig) == [
         {
-            "event": "worker_login_failed",
             "method": PIN_METHOD_NAME,
             "user_id": str(W3),
             "known_worker": True,
+            "locked": False,
         }
     ]

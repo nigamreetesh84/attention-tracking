@@ -2,7 +2,8 @@
 
 A worker disputes one of their own attention events with a reason. The
 dispute travels to the server as the contract's `dispute` batch item
-(`ag_shared.api.DisputePayload`: `attention_event_id, user_id, message`).
+(`ag_shared.api.DisputePayload`: `attention_event_id, user_id, message` and,
+since schema revision 2, an optional `reason` code).
 
 Exactly once (double tap, retry, restart):
 
@@ -29,7 +30,7 @@ from enum import StrEnum
 from typing import Final
 from uuid import UUID
 
-from ag_shared.api import DisputePayload, EventType
+from ag_shared.api import DisputePayload, DisputeReasonCode, EventType
 from ag_shared.ids import Uuid7Generator
 
 from ag_workstation.clock import Clock
@@ -84,19 +85,31 @@ class DisputeService:
         self._ids = ids or Uuid7Generator(now=clock.now)
         self._lock = threading.Lock()
 
-    def submit(self, user_id: UUID, attention_event_id: UUID, message: str) -> DisputeResult:
-        """Dispute `attention_event_id` for `user_id` with `message`."""
+    def submit(
+        self,
+        user_id: UUID,
+        attention_event_id: UUID,
+        message: str,
+        reason: DisputeReasonCode | None = None,
+    ) -> DisputeResult:
+        """Dispute `attention_event_id` for `user_id` with `message` and an optional code."""
         text = " ".join(str(message).split())[:MAX_MESSAGE_CHARS]
         if not text:
             return DisputeResult(DisputeOutcome.FAILED)
         with self._lock:
             try:
-                return self._submit(user_id, attention_event_id, text)
+                return self._submit(user_id, attention_event_id, text, reason)
             except Exception as exc:
                 logger.error("dispute not saved (%s)", type(exc).__name__)
                 return DisputeResult(DisputeOutcome.FAILED)
 
-    def _submit(self, user_id: UUID, attention_event_id: UUID, text: str) -> DisputeResult:
+    def _submit(
+        self,
+        user_id: UUID,
+        attention_event_id: UUID,
+        text: str,
+        reason: DisputeReasonCode | None,
+    ) -> DisputeResult:
         self._recover_locked()
         if self._store.event_for(user_id, attention_event_id) is None:
             return DisputeResult(DisputeOutcome.NOT_FOUND)
@@ -106,6 +119,7 @@ class DisputeService:
             user_id=user_id,
             message=text,
             created_at=self._clock.now(),
+            reason=reason,
         )
         if not new:
             if record.status is DisputeStatus.PENDING:
@@ -121,6 +135,7 @@ class DisputeService:
             attention_event_id=record.attention_event_id,
             user_id=record.user_id,
             message=record.message,
+            reason=record.reason,
         )
         try:
             self._queue.enqueue(EventType.DISPUTE, payload, record.created_at, record_id=record.id)

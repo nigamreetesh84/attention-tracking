@@ -149,9 +149,16 @@ The live wall treats a workstation as offline after 15 s without a heartbeat.
 | `scan` | `session_id, user_id, barcode, state_at_scan, confidence, outcome` |
 | `attention_event` | `kind, state, confidence, low_confidence, started_at, ended_at, scan_id, session_id, user_id, signals, camera_states, engine_version, config_version, images_withheld, image_ids: [...]` |
 | `bucket` | `bucket_start, user_id, seconds: {state: n}` |
-| `dispute` | `attention_event_id, user_id, message` |
+| `dispute` | `attention_event_id, user_id, message, reason` (optional code: `was_attentive`, `camera_view`, `on_break`, `other_task`, `other`) |
 | `health` | one-minute health sample |
 | `local_alert` | `kind, detail` (camera offline, disk full, clock drift, engine restart) |
+| `login_failure` | `method, user_id` (the roster user the typed ID matched, or null), `known_worker` |
+
+Added 2026-11-21 (owner-approved, schema revision 2): the `login_failure`
+type (a failed worker login on the station, for the audit log; what was typed
+is never sent), the `dispute` `reason` code (an unknown code means `other`),
+the `images_withheld` value `on_break` and the `end_reason` values
+`assignment_expired` and `supervisor_ended` (values in `schema.md`).
 
 Response `200`:
 
@@ -167,6 +174,10 @@ Response `200`:
   arrived). The client keeps the record and retries.
 - A non-2xx response or timeout means nothing is assumed; the same batch is
   sent again with the same `batch_id`.
+- A batch-level `403` or `409` (the whole request refused, not one item) never
+  makes the client drop or dead-letter metadata: it keeps the records, reports
+  a `forbidden` flag in health and retries with backoff (added 2026-11-21,
+  owner-approved).
 
 ### 4.4 Evidence upload
 

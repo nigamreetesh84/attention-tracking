@@ -144,7 +144,8 @@ for rollback.
 **worker_session**: `id` (client), `workstation_id`, `user_id`, `method`
 (`employee_id_pin`, `supervisor_assigned`), `station_assignment_id`
 (nullable), `started_at`, `ended_at`, `end_reason` (`logout`, `timeout`,
-`shift_end`, `replaced`), `received_at`.
+`shift_end`, `replaced`, `assignment_expired`, `supervisor_ended`),
+`received_at`.
 
 **scan_record**: `id` (client), `workstation_id`, `worker_session_id`
 (nullable: unattributed scan), `user_id` (nullable), `barcode`, `scanned_at`,
@@ -158,7 +159,8 @@ for rollback.
 `started_at`, `ended_at` (null for scan warnings), `scan_record_id`
 (nullable, unique), `signals` JSONB (signal snapshot), `camera_states` JSONB
 (per-camera state and quality), `engine_version`, `config_version`,
-`images_withheld` (`none`, `no_consent`, `no_worker`, `disk_full`),
+`images_withheld` (`none`, `no_consent`, `no_worker`, `on_break`,
+`disk_full`),
 `review_status` (`pending`, `confirmed`, `false_positive`), `reviewed_by`,
 `reviewed_at`, `review_note`, `escalated`, `received_at`.
 Index (`workstation_id`, `started_at`), (`user_id`, `started_at`),
@@ -180,7 +182,8 @@ Attention score = attentive seconds / (attentive + distracted + drowsy +
 sleeping + absent seconds) x 100. `unknown` and `on_break` are excluded.
 
 **dispute**: `id` (client), `attention_event_id`, `raised_by` (the worker),
-`raised_at`, `message`, `status` (`open`, `upheld`, `rejected`),
+`raised_at`, `message`, `reason` (nullable: `was_attentive`, `camera_view`,
+`on_break`, `other_task`, `other`), `status` (`open`, `upheld`, `rejected`),
 `resolved_by`, `resolved_at`, `resolution_note`.
 
 **alert**: `id`, `site_id`, `workstation_id` (nullable), `user_id`

@@ -145,6 +145,20 @@ def test_burst_request_and_outcome(server: IpcServer, client: IpcClient, control
     assert client.burst_outcome(EVENT) == BurstStatus("unknown")
 
 
+def test_break_outcome_crosses_ipc_as_on_break(
+    server: IpcServer, client: IpcClient, control: Control
+) -> None:
+    """3.1b (owner decision 1b): a burst withheld for a break reaches the UI's
+    `attention_event` as `images_withheld = on_break` (was `no_worker`)."""
+    control.status = BurstStatus(
+        "done", CaptureOutcome(EVENT, (), ImagesWithheld.ON_BREAK, GateReason.ON_BREAK, 6)
+    )
+    answer = client.burst_outcome(EVENT)
+    assert answer is not None and answer.outcome is not None
+    assert answer.outcome.images_withheld is ImagesWithheld.ON_BREAK
+    assert answer.outcome.gate_reason is GateReason.ON_BREAK
+
+
 def test_control_ops_without_a_control_handler_are_unsupported(
     transport: PipeTransport, client: IpcClient
 ) -> None:

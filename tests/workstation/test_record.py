@@ -15,6 +15,7 @@ from ag_shared.api import (
     AttentionEventKind,
     AttentionEventPayload,
     DisputePayload,
+    DisputeReasonCode,
     EventType,
     ImagesWithheld,
     ScanPayload,
@@ -427,6 +428,34 @@ def test_dispute_is_queued_with_the_contract_payload(
     )
     (shown,) = store.snapshot(ASHA).events
     assert shown.dispute is DisputeStatus.QUEUED
+
+
+def test_dispute_reason_code_is_queued_and_survives_recovery(
+    tmp_path: Path, clock: FakeClock, queue: EventQueue, my_event: UUID, store: PersonalRecordStore
+) -> None:
+    """3.1b (owner decision 1d): the optional reason code is sent, and a dispute
+    saved before a crash is re-queued with the same code."""
+    flaky = FlakyQueue(queue)
+    saved = DisputeService(store, flaky, clock).submit(
+        ASHA, my_event, "x", reason=DisputeReasonCode.ON_BREAK
+    )
+    assert saved.outcome is DisputeOutcome.SAVED
+    store.close()
+    with PersonalRecordStore.open(tmp_path / "my_record.db", KEY, clock) as reopened:
+        assert DisputeService(reopened, queue, clock).recover() == 1
+    (record,) = queue.claim_batch()
+    assert record.id == saved.dispute_id
+    payload = DisputePayload.model_validate(record.payload)
+    assert payload.reason is DisputeReasonCode.ON_BREAK
+    assert payload.message == "x"
+
+
+def test_dispute_without_a_reason_code_sends_none(
+    store: PersonalRecordStore, queue: EventQueue, clock: FakeClock, my_event: UUID
+) -> None:
+    DisputeService(store, queue, clock).submit(ASHA, my_event, "x")
+    (record,) = queue.claim_batch()
+    assert DisputePayload.model_validate(record.payload).reason is None
 
 
 def test_double_tap_queues_one_dispute(

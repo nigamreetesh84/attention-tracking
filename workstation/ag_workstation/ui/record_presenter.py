@@ -27,7 +27,7 @@ from enum import StrEnum
 from typing import Final, Protocol
 from uuid import UUID
 
-from ag_shared.api import AttentionEventKind
+from ag_shared.api import AttentionEventKind, DisputeReasonCode
 from ag_shared.i18n import TranslateFn, Translator, t
 
 from ag_workstation.auth import CurrentSession
@@ -53,7 +53,13 @@ class RecordSource(Protocol):
 class DisputeSubmitter(Protocol):
     """`DisputeService.submit`: never raises, queues at most once per event."""
 
-    def submit(self, user_id: UUID, attention_event_id: UUID, message: str) -> DisputeResult:
+    def submit(
+        self,
+        user_id: UUID,
+        attention_event_id: UUID,
+        message: str,
+        reason: DisputeReasonCode | None = None,
+    ) -> DisputeResult:
         """Dispute one of the worker's events."""
         ...
 
@@ -70,6 +76,11 @@ class DisputeReason(StrEnum):
     def key(self) -> str:
         """Catalog key of the reason's text."""
         return f"ui.record.reason.{self.value}"
+
+    @property
+    def code(self) -> DisputeReasonCode:
+        """The contract's `dispute.reason` code (same value)."""
+        return DisputeReasonCode(self.value)
 
 
 _OUTCOME_MESSAGES: Final = {
@@ -314,10 +325,11 @@ class RecordPresenter:
             return
         user_id, event_id = session.user_id, event.id
         message = self._message_t(reason.key)
+        code = reason.code
         self._busy = True
 
         def job() -> None:
-            result = self._disputes.submit(user_id, event_id, message)
+            result = self._disputes.submit(user_id, event_id, message, code)
             self._inbox.append((user_id, event_id, result))
 
         try:
