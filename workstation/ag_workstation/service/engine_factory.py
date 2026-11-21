@@ -18,13 +18,17 @@ Everything fails open:
   camera gets no provider, its state is Unknown, health says
   `model_unavailable`; the child keeps running;
 - no data directory or no data key: evidence is withheld (`disk_full`) and
-  engine events are counted as lost; detection and scan answers still work.
+  engine events are counted as lost; detection and scan answers still work;
+- no service key (task 3.0, `service.service_key`): evidence is withheld
+  (`disk_full`, metadata only); episodes are still queued with the data key.
 
 Configuration comes from the environment the service gives the child:
 `AG_ENGINE_CONFIG` (path to an `EngineConfig` JSON file), `AG_MODEL_DIR`,
 `AG_DATA_DIR` (queue and evidence store) and, outside Windows, `AG_DATA_KEY`
-(hex data key, development only; on Windows the DPAPI key file under
-`AG_DATA_DIR/keys` is used).
+and `AG_SERVICE_KEY` (hex keys, development only; on Windows the DPAPI key
+files `AG_DATA_DIR/keys/data.key` and `AG_DATA_DIR/service/service.key` are
+used). Evidence files are sealed with the service key, which the kiosk UI
+never holds; the queue and the record mirror use the data key.
 """
 
 import logging
@@ -52,6 +56,7 @@ from ag_workstation.landmarks.types import LandmarkError, LandmarkProvider
 from ag_workstation.queue import DpapiKeyProvider, InMemoryKeyProvider, KeyProvider
 from ag_workstation.record import RECORD_FILE, PersonalRecordStore, RecordMirror
 from ag_workstation.scan.journal import ItemQueue
+from ag_workstation.service.service_key import service_key_provider, usable
 from ag_workstation.service.station import (
     EngineEventRecorder,
     FanOut,
@@ -188,6 +193,7 @@ def build_station(
     provider_factory: ProviderFactory | None = None,
     encoder: JpegEncoder | None = None,
     keys: KeyProvider | None = None,
+    service_keys: KeyProvider | None = None,
     start: bool = True,
     tick_interval_s: float = 0.1,
     pump_interval_s: float = PUMP_INTERVAL_S,
@@ -196,8 +202,10 @@ def build_station(
     """Assemble the real engine and its evidence path. Never raises for
     missing hardware, models, config or storage (see the module docstring).
 
-    `evidence_disk_free` replaces the evidence store's free-space probe
-    (tests: a full disk without filling one)."""
+    `keys` is the queue data key, `service_keys` the service-only key that
+    seals evidence files (each None: from `env`). `evidence_disk_free`
+    replaces the evidence store's free-space probe (tests: a full disk
+    without filling one)."""
     from ag_workstation.evidence.alerts import QueueDiskFullAlert
     from ag_workstation.evidence.store import EvidenceStore
     from ag_workstation.queue import EventQueue
@@ -222,15 +230,28 @@ def build_station(
             # Enqueue only: the service parent is the queue's single sender.
             queue = EventQueue.open(data_dir / "queue.db", keys, clock, recover_sending=False)
             closers.append(queue.close)
+        except Exception as exc:
+            logger.error("local queue unavailable (%s); events not queued", type(exc).__name__)
+    else:
+        logger.warning("no data directory or key: evidence withheld, events not queued")
+    service_keys = usable(service_keys or service_key_provider(env, data_dir))
+    if queue is not None and data_dir is not None and service_keys is None:
+        logger.error("no service key: evidence withheld (metadata only)")
+    elif queue is not None and data_dir is not None and service_keys is not None:
+        try:
             alert_sink = QueueDiskFullAlert(queue, utc)
             store = (
                 EvidenceStore.open(
-                    data_dir / "evidence", keys, clock, alert_sink=alert_sink, stamp=utc.stamp
+                    data_dir / "evidence",
+                    service_keys,
+                    clock,
+                    alert_sink=alert_sink,
+                    stamp=utc.stamp,
                 )
                 if evidence_disk_free is None
                 else EvidenceStore.open(
                     data_dir / "evidence",
-                    keys,
+                    service_keys,
                     clock,
                     alert_sink=alert_sink,
                     disk_free=evidence_disk_free,
@@ -239,9 +260,7 @@ def build_station(
             )
             closers.append(store.close)
         except Exception as exc:
-            logger.error("local storage unavailable (%s); metadata only", type(exc).__name__)
-    else:
-        logger.warning("no data directory or key: evidence withheld, events not queued")
+            logger.error("evidence store unavailable (%s); metadata only", type(exc).__name__)
 
     sessions = PushedSessions(clock)
     outcomes = OutcomeRegistry(clock)

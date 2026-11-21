@@ -19,7 +19,7 @@ from pathlib import Path
 from ag_workstation.clock import Clock
 from ag_workstation.engine.runtime import FeedFactory, ProviderFactory
 from ag_workstation.landmarks.mediapipe_provider import MODEL_DIR_ENV
-from ag_workstation.queue import KeyProvider
+from ag_workstation.queue import InMemoryKeyProvider, KeyProvider
 from ag_workstation.service import IpcClient, PipeTransport, default_address
 from ag_workstation.service.engine_factory import DATA_DIR_ENV, build_station
 from ag_workstation.service.ipc_server import IpcServer
@@ -70,6 +70,9 @@ def start_local_station(
         env=env,
         clock=clock,
         keys=keys,
+        # Manual-check mode only: the engine runs in this process, so it gets a
+        # per-run service key here (the installed UI never holds one, 3.0).
+        service_keys=InMemoryKeyProvider(),
         feed_factory=feed_factory,
         provider_factory=provider_factory,
     )

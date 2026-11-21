@@ -112,6 +112,8 @@ _SCHEMA = (
 
 _META_EPISODE: Final = "disk_full_active"
 _META_LAST_ALERT: Final = "last_alert_at"
+_META_RESEALED: Final = "legacy_resealed"
+"""Set once pre-3.0 files were re-sealed under the service key (or there were none)."""
 
 
 class RemovalReason(StrEnum):
@@ -331,8 +333,14 @@ class EvidenceStore:
         min_free_mb: int = DEFAULT_MIN_FREE_MB,
         alert_min_interval: timedelta = DEFAULT_ALERT_MIN_INTERVAL,
         stamp: Callable[[datetime], datetime] | None = None,
+        legacy_keys: KeyProvider | None = None,
     ) -> Self:
         """Open (creating if needed) the store under `root` and repair it after a crash.
+
+        `keys` is the service-only key (task 3.0). `legacy_keys` (the queue data
+        key) is passed by the service parent only: the first open that has it
+        re-seals files written before 3.0 under the service key, once
+        (`_reseal_legacy`); later opens never read legacy files again.
 
         `stamp` turns a frame's device capture time into the corrected UTC
         stored and uploaded as `captured_at` (contract 6, "Clock"); None keeps
@@ -343,7 +351,7 @@ class EvidenceStore:
         """
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
-        files = EncryptedImageFiles(root / IMAGES_DIR, keys)
+        files = EncryptedImageFiles(root / IMAGES_DIR, keys, legacy_keys=legacy_keys)
         conn = sqlite3.connect(
             root / INDEX_NAME, timeout=5.0, isolation_level=None, check_same_thread=False
         )
@@ -366,6 +374,8 @@ class EvidenceStore:
             )
             store._init_schema()
             store._recover()
+            if legacy_keys is not None:
+                store._reseal_legacy()
         except BaseException:
             conn.close()
             raise
@@ -436,6 +446,49 @@ class EvidenceStore:
                 temporaries,
                 len(orphans),
                 len(missing),
+            )
+
+    def _reseal_legacy(self) -> None:
+        """Migration to the service key (3.0), done once per store.
+
+        Every held image whose file is a pre-3.0 file is re-sealed under the
+        service key; one that does not open with the legacy key is removed as
+        corrupt (it could never be uploaded). Then `_META_RESEALED` is set, so
+        a legacy file that appears later (planted by an account holding only
+        the data key) is never read: it fails as corrupt at upload.
+        """
+        with self._lock:
+            if self._meta(self._conn, _META_RESEALED):
+                return
+            rows = self._conn.execute(
+                "SELECT id, event_id, camera_slot, seq, offset_ms, captured_at, "
+                "sha256, size_bytes, stored_bytes, uploaded, created_at, removed_reason "
+                "FROM evidence_image WHERE removed_reason IS NULL ORDER BY ord"
+            ).fetchall()
+        resealed = 0
+        failed: list[UUID] = []
+        for image in (self._row(r) for r in rows):
+            if not self._files.is_legacy(image.image_id):
+                continue
+            try:
+                self._files.reseal_legacy(image.image_id, image.associated_data())
+                resealed += 1
+            except Exception as exc:
+                # A key or integrity failure; disk errors leave the old file, which
+                # then fails at upload as corrupt like any unreadable file.
+                logger.error(
+                    "evidence image %s not re-sealed (%s)", image.image_id, type(exc).__name__
+                )
+                failed.append(image.image_id)
+        if failed:
+            self._remove(failed, RemovalReason.CORRUPT)
+        with self._tx() as conn:
+            self._set_meta(conn, _META_RESEALED, 1)
+        if resealed or failed:
+            logger.warning(
+                "evidence re-sealed under the service key: %d files, %d removed as corrupt",
+                resealed,
+                len(failed),
             )
 
     def _now_ms(self) -> int:

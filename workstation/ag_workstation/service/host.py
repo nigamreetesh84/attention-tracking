@@ -151,7 +151,9 @@ def default_service_host(env: Mapping[str, str] | None = None) -> ServiceHost:
     queue (this process is the queue's single sender, so it recovers records
     a crashed sender left `sending`), housekeeping runs, and the sync client
     runs on its own thread when `AG_SERVER_URL` is set (PLAN 2.9). Without
-    them alerts are only logged.
+    them alerts are only logged. Evidence and the device credentials use the
+    service-only key (`service.service_key`, 3.0); without it the host still
+    starts (evidence withheld, sync cannot authenticate).
     """
     import os
 

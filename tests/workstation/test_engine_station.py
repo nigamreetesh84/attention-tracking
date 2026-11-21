@@ -39,6 +39,8 @@ from ag_workstation.service.station import (
 
 A = AttentionState
 KEY = bytes(range(32))
+SERVICE_KEY = bytes(range(100, 132))
+"""The service-only key (3.0) that seals evidence files."""
 SESSION = UUID("0193a0b0-0000-7000-8000-0000000c0001")
 USER = UUID("0193a0b0-0000-7000-8000-0000000c0002")
 EVENT = UUID("0193a0b0-0000-7000-8000-0000000c0003")
@@ -71,7 +73,9 @@ class World:
 
 
 class Station:
-    def __init__(self, tmp: Path, *, config: bool = True, data: bool = True) -> None:
+    def __init__(
+        self, tmp: Path, *, config: bool = True, data: bool = True, service_key: bool = True
+    ) -> None:
         self.world = World()
         self.clock = FakeClock(start_utc=T0)
         self.tmp = tmp
@@ -90,6 +94,7 @@ class Station:
             provider_factory=self.world.provider,
             encoder=fake_jpeg,
             keys=InMemoryKeyProvider(KEY) if data else None,
+            service_keys=InMemoryKeyProvider(SERVICE_KEY) if data and service_key else None,
             tick_interval_s=3600.0,
             pump_interval_s=3600.0,
         )
@@ -120,7 +125,7 @@ class Station:
 
     def images(self, event_id: UUID) -> int:
         store = EvidenceStore.open(
-            self.tmp / "data" / "evidence", InMemoryKeyProvider(KEY), self.clock
+            self.tmp / "data" / "evidence", InMemoryKeyProvider(SERVICE_KEY), self.clock
         )
         try:
             return len(store.event_images(event_id))
@@ -158,6 +163,33 @@ def test_warned_scan_burst_is_gated_and_stored_with_consent(station: Station) ->
     assert len(outcome.image_ids) == outcome.frames == 6
     station.child.close()
     assert station.images(EVENT) == 6
+
+
+def test_no_service_key_withholds_images_but_detection_and_events_go_on(tmp_path: Path) -> None:
+    """3.0 fail-open: without the service-only key the child stores no image
+    (metadata only, `disk_full`), and still answers scans and queues episodes."""
+    station = Station(tmp_path, service_key=False)
+    try:
+        station.login()
+        station.run(6.0)
+        station.world.ear = {1: 0.05, 2: 0.05}
+        station.run(6.0)
+        state = station.child.scan_state()
+        assert state.state is A.SLEEPING
+        station.child.request_burst(EVENT, BurstKind.SCAN_WARNING, state.ts)
+        station.run(2.0)
+        outcome = _outcome(station.child, EVENT)
+        assert outcome.gate_reason is GateReason.OPEN
+        assert outcome.images_withheld is ImagesWithheld.DISK_FULL
+        assert outcome.image_ids == ()
+        station.world.ear = {1: 0.30, 2: 0.30}
+        station.run(4.0)
+    finally:
+        station.child.close()
+    assert not (tmp_path / "data" / "evidence" / "images").exists()
+    episodes = [p for t, p in station.records() if t == EventType.ATTENTION_EVENT]
+    assert episodes and episodes[0]["state"] == A.SLEEPING
+    assert episodes[0]["images_withheld"] == ImagesWithheld.DISK_FULL
 
 
 def test_no_session_means_no_images(station: Station) -> None:
@@ -585,7 +617,7 @@ def test_child_stamps_evidence_and_episodes_from_the_shared_offset(tmp_path: Pat
         station.run(4.0)
     finally:
         station.child.close()
-    store = EvidenceStore.open(data / "evidence", InMemoryKeyProvider(KEY), station.clock)
+    store = EvidenceStore.open(data / "evidence", InMemoryKeyProvider(SERVICE_KEY), station.clock)
     try:
         images = store.event_images(EVENT)
         assert len(images) == 6

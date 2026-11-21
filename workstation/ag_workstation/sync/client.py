@@ -69,6 +69,7 @@ from ag_workstation.evidence.store import (
     UploadImage,
 )
 from ag_workstation.queue.backoff import MAX_BACKOFF_S, backoff_delay
+from ag_workstation.queue.keys import KeyUnavailableError
 from ag_workstation.queue.store import ApplySummary, ClaimedRecord, DeadLetterReason, QueueStats
 from ag_workstation.sync.api import (
     ApiError,
@@ -296,7 +297,10 @@ class SyncClient:
         except Exception as exc:
             logger.error("device credentials unreadable (%s)", type(exc).__name__)
             self._flags.add(SyncFlag.CREDENTIAL_STORE_FAILED)
+            if isinstance(exc, KeyUnavailableError):
+                self._flags.add(SyncFlag.SERVICE_KEY_UNAVAILABLE)
             return NOT_ENROLLED_SLEEP_S
+        self._flags.discard(SyncFlag.SERVICE_KEY_UNAVAILABLE)
         if not enrolled:
             self._flags.add(SyncFlag.NOT_ENROLLED)
             return NOT_ENROLLED_SLEEP_S

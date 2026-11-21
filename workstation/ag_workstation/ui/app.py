@@ -25,6 +25,9 @@ With the shared data key (`AG_DATA_KEY`, or DPAPI on Windows) the roster is
 the config bundle the service's sync client stored, kept current by a
 `SyncConsumer` thread that also runs supervisor session commands (2.9).
 Without it the queue key is per run and there is no roster without `--dev`.
+This process never holds the service-only key (task 3.0, `service.service_key`):
+evidence image files and the device credentials are sealed with it, so the
+kiosk account cannot read them; the UI only asks the engine child for bursts.
 
 "My record" (2.10) reads `PersonalRecordStore` (`AG_DATA_DIR/my_record.db`),
 fed by a `RecordMirror` around the queue that the scan flow and the session

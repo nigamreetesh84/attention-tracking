@@ -26,6 +26,7 @@ from ag_workstation.scan import ScanFlow, ScanJournal
 from ag_workstation.service import EngineSupervisor, ServiceHost
 from ag_workstation.service import engine_factory as ef
 from ag_workstation.service.health import HealthReporter
+from ag_workstation.service.service_key import SERVICE_KEY_ENV
 from ag_workstation.service.supervisor import SupervisorHealth
 from ag_workstation.sync import (
     ConfigStore,
@@ -49,6 +50,8 @@ from pydantic import SecretStr
 Json = dict[str, Any]  # Any: free-form JSON fixtures
 
 KEY = bytes(range(32))
+SERVICE_KEY_HEX = bytes(range(100, 132)).hex()
+"""The service-only key (3.0), given by `AG_SERVICE_KEY` off Windows."""
 T0 = datetime(2026, 11, 21, 8, 0, tzinfo=UTC)
 STATION = UUID("0193a0b0-0000-7000-8000-00000000d001")
 
@@ -299,7 +302,7 @@ def test_service_components_from_env(tmp_path: Path) -> None:
     keys = InMemoryKeyProvider(KEY)
     queue = EventQueue.open(tmp_path / "q.db", keys, clock)
     parts = service_components(
-        {SERVER_URL_ENV: "https://ag.example"},
+        {SERVER_URL_ENV: "https://ag.example", SERVICE_KEY_ENV: SERVICE_KEY_HEX},
         data_dir=tmp_path,
         keys=keys,
         queue=queue,
@@ -323,7 +326,12 @@ def test_service_components_from_env(tmp_path: Path) -> None:
     for close in parts.closers:
         close()
     offline = service_components(
-        {}, data_dir=tmp_path, keys=keys, queue=queue, clock=clock, supervisor=Supervisor()
+        {SERVICE_KEY_ENV: SERVICE_KEY_HEX},
+        data_dir=tmp_path,
+        keys=keys,
+        queue=queue,
+        clock=clock,
+        supervisor=Supervisor(),
     )
     assert offline.sync is None and "health_sample" in offline.housekeeper.jobs
     for close in offline.closers:

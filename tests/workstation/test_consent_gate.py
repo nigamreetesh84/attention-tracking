@@ -917,7 +917,7 @@ def test_store_calls_files_write_only_inside_save_frame() -> None:
 BINARY_WRITERS = {
     # module: why it may write bytes to disk (2.R: an explicit, reasoned list)
     "evidence/files.py": "the encrypted evidence image files (the only image writer)",
-    "queue/keys.py": "DPAPI-wrapped key files (data key, IPC key)",
+    "queue/keys.py": "DPAPI-wrapped key files (data key, IPC key, service key)",
     "scan/journal.py": "sealed scan journal lines, os.write on an O_APPEND descriptor",
 }
 """`sync/sealed_file.py` (bundle, credentials) and `corrected_time.py` write

@@ -131,6 +131,8 @@ from pydantic import SecretStr
 Json = dict[str, Any]  # Any: free-form JSON for bundles and decoded payloads
 
 KEY = bytes(range(32))
+SERVICE_KEY = bytes(range(100, 132))
+"""The service-only key (3.0): evidence files and the device credentials."""
 AUTHKEY = b"f" * 32
 T0 = datetime(2026, 11, 21, 4, 30, tzinfo=UTC)
 STATION = UUID("0193a0b0-0000-7000-8000-00000000f001")
@@ -311,6 +313,7 @@ class Station:
         self.data.mkdir(parents=True)
         self.clock = FakeClock(start_utc=T0)
         self.keys = InMemoryKeyProvider(KEY)
+        self.service_keys = InMemoryKeyProvider(SERVICE_KEY)
         self.cams = Cameras(cameras)
         self.free_bytes = 10**12
         self.seq = 0
@@ -342,6 +345,7 @@ class Station:
             engine_health=self.service_ipc.health,
             transport=HttpxTransport("https://ag.test", transport=httpx.MockTransport(self.device)),
             credentials=InMemoryCredentialStore(DeviceCredentials(STATION, SecretStr(SECRET))),
+            service_keys=self.service_keys,
         )
         assert self.parts.sync is not None
         self.sync = self.parts.sync
@@ -356,6 +360,7 @@ class Station:
             provider_factory=self.cams.provider,
             encoder=_fake_jpeg,
             keys=self.keys,
+            service_keys=self.service_keys,
             tick_interval_s=3600.0,  # the test ticks
             pump_interval_s=3600.0,  # the test pumps
             evidence_disk_free=lambda _path: self.free_bytes,
@@ -915,7 +920,7 @@ def test_disk_full_purges_oldest_images_and_alerts(make_station: Callable[..., S
     (alert,) = station.alerts(LocalAlertKind.DISK_FULL)
     assert alert["kind"] == LocalAlertKind.DISK_FULL.value
 
-    store = EvidenceStore.open(station.data / "evidence", station.keys, station.clock)
+    store = EvidenceStore.open(station.data / "evidence", station.service_keys, station.clock)
     try:
         assert first.event_id is not None and second.event_id is not None
         purged = store.event_images(first.event_id)
@@ -1091,7 +1096,7 @@ def test_corrected_clock_keeps_the_capture_gate_on_device_time(
     (late_scan,) = [r for r in station.queued(EventType.SCAN) if r.id == late.scan_id]
     assert late_scan.occurred_at - late.scanned_at == timedelta(0)
     assert abs((late.scanned_at - station.clock.now()).total_seconds() - 30) < 3.0
-    store = EvidenceStore.open(station.data / "evidence", station.keys, station.clock)
+    store = EvidenceStore.open(station.data / "evidence", station.service_keys, station.clock)
     try:
         assert late.event_id is not None
         images = store.event_images(late.event_id)

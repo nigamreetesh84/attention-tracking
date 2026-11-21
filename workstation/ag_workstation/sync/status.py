@@ -52,6 +52,8 @@ class SyncFlag(StrEnum):
     CLOCK_DRIFT = "clock_drift"
     CONFIG_REJECTED = "config_rejected"
     CREDENTIAL_STORE_FAILED = "credential_store_failed"
+    SERVICE_KEY_UNAVAILABLE = "service_key_unavailable"
+    """The service-only key (3.0) cannot be produced: no device secret, no evidence."""
     SYNC_ERROR = "sync_error"
     """An unexpected exception in the sync loop (caught at the boundary)."""
 

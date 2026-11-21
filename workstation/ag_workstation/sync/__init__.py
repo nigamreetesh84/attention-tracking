@@ -36,6 +36,7 @@ from ag_workstation.sync.credentials import (
     DeviceCredentials,
     InMemoryCredentialStore,
     SealedFileCredentialStore,
+    UnavailableCredentialStore,
 )
 from ag_workstation.sync.runner import SyncRunner
 from ag_workstation.sync.status import StationStatus, StatusSource, SyncFlag, SyncHealth
@@ -75,6 +76,7 @@ __all__ = [
     "SyncRunner",
     "SyncTransport",
     "TransportError",
+    "UnavailableCredentialStore",
     "bundle_path",
     "load_bundle",
     "problem_code",

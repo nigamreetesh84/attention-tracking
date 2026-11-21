@@ -6,8 +6,12 @@ event id, camera slot, seq, offset, capture time, plaintext hash), so a file
 renamed to another image id, or an index row whose metadata was edited, fails
 authentication on read.
 
-The file key is derived from the queue's DPAPI-protected data key with HKDF
-and a distinct label, so queue payloads and image files never share a key.
+The file key is derived with HKDF from the **service-only key**
+(`service.service_key`, task 3.0), which the kiosk UI process never holds, so
+a kiosk-account escape cannot decrypt evidence. Files of releases before 3.0
+(`LEGACY_MAGIC`, key derived from the queue data key) are re-sealed once by
+the service parent (`EvidenceStore.open(legacy_keys=...)`, `reseal_legacy`);
+`read` refuses them otherwise.
 
 Writes are atomic: the ciphertext goes to a temporary name (exclusive create,
 fsync), is renamed into place and the directory is synced. A crash leaves at
@@ -27,20 +31,36 @@ from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from ag_workstation.queue.crypto import NONCE_BYTES, PayloadCipher, PayloadIntegrityError
-from ag_workstation.queue.keys import DATA_KEY_BYTES, InMemoryKeyProvider, KeyProvider
+from ag_workstation.queue.keys import (
+    DATA_KEY_BYTES,
+    InMemoryKeyProvider,
+    KeyProvider,
+    KeyUnavailableError,
+)
 
-MAGIC: Final = b"AGE1"
+MAGIC: Final = b"AGE2"
+"""Sealed with the service-only key (3.0)."""
+LEGACY_MAGIC: Final = b"AGE1"
+"""Sealed with the queue data key (before 3.0); only `reseal_legacy` reads it."""
 TAG_BYTES: Final = 16
 FILE_OVERHEAD: Final = len(MAGIC) + NONCE_BYTES + TAG_BYTES
 """Bytes an encrypted file adds to its JPEG."""
 FILE_SUFFIX: Final = ".agev"
 TMP_PREFIX: Final = ".tmp-"
-_KDF_INFO: Final = b"AttentionGuard evidence file key v1"
+_KDF_INFO: Final = b"AttentionGuard evidence file key v2 (service key)"
+_LEGACY_KDF_INFO: Final = b"AttentionGuard evidence file key v1"
 
 
 def derive_evidence_key(keys: KeyProvider) -> bytes:
-    """The evidence file key: HKDF-SHA256 of the data key with an evidence label."""
+    """The evidence file key: HKDF-SHA256 of the service key with an evidence label."""
     return HKDF(algorithm=SHA256(), length=DATA_KEY_BYTES, salt=None, info=_KDF_INFO).derive(
+        keys.data_key()
+    )
+
+
+def derive_legacy_evidence_key(keys: KeyProvider) -> bytes:
+    """The pre-3.0 file key: HKDF-SHA256 of the queue data key (migration only)."""
+    return HKDF(algorithm=SHA256(), length=DATA_KEY_BYTES, salt=None, info=_LEGACY_KDF_INFO).derive(
         keys.data_key()
     )
 
@@ -71,10 +91,16 @@ def image_associated_data(
 class EncryptedImageFiles:
     """The directory of sealed image files, one per image id."""
 
-    def __init__(self, directory: Path, keys: KeyProvider) -> None:
+    def __init__(
+        self, directory: Path, keys: KeyProvider, *, legacy_keys: KeyProvider | None = None
+    ) -> None:
+        """`keys` is the service key. `legacy_keys` (the queue data key) is given
+        only by the service parent, to re-seal pre-3.0 files."""
         self._dir = directory
         self._dir.mkdir(parents=True, exist_ok=True)
         self._cipher = PayloadCipher(InMemoryKeyProvider(derive_evidence_key(keys)))
+        self._legacy_keys = legacy_keys
+        self._legacy_cipher: PayloadCipher | None = None
 
     @property
     def directory(self) -> Path:
@@ -117,10 +143,42 @@ class EncryptedImageFiles:
         if it is not a valid sealed file for this metadata.
         """
         raw = self.path_for(image_id).read_bytes()
-        if not raw.startswith(MAGIC) or len(raw) < FILE_OVERHEAD:
+        if raw.startswith(LEGACY_MAGIC):
+            raise PayloadIntegrityError("evidence file is sealed under the retired data key")
+        return self._open(self._cipher, MAGIC, raw, associated_data)
+
+    @staticmethod
+    def _open(cipher: PayloadCipher, magic: bytes, raw: bytes, associated_data: bytes) -> bytes:
+        if not raw.startswith(magic) or len(raw) < FILE_OVERHEAD:
             raise PayloadIntegrityError("evidence file has no valid header")
-        nonce = raw[len(MAGIC) : len(MAGIC) + NONCE_BYTES]
-        return self._cipher.decrypt(nonce, raw[len(MAGIC) + NONCE_BYTES :], associated_data)
+        nonce = raw[len(magic) : len(magic) + NONCE_BYTES]
+        return cipher.decrypt(nonce, raw[len(magic) + NONCE_BYTES :], associated_data)
+
+    def is_legacy(self, image_id: UUID) -> bool:
+        """Whether the image's file is a pre-3.0 file (False if it is missing)."""
+        try:
+            with self.path_for(image_id).open("rb") as fh:
+                return fh.read(len(LEGACY_MAGIC)) == LEGACY_MAGIC
+        except FileNotFoundError:
+            return False
+
+    def reseal_legacy(self, image_id: UUID, associated_data: bytes) -> int:
+        """Re-seal a pre-3.0 file under the service key, atomically; returns its size.
+
+        Not a new image: the same bytes, already permitted by the capture gate
+        when first written, bound to the same metadata. Raises
+        `PayloadIntegrityError` if the file does not open with the legacy key,
+        `KeyUnavailableError` if there is no legacy key, `OSError` on disk errors.
+        """
+        if self._legacy_cipher is None:
+            if self._legacy_keys is None:
+                raise KeyUnavailableError("no legacy data key to re-seal with")
+            self._legacy_cipher = PayloadCipher(
+                InMemoryKeyProvider(derive_legacy_evidence_key(self._legacy_keys))
+            )
+        raw = self.path_for(image_id).read_bytes()
+        jpeg = self._open(self._legacy_cipher, LEGACY_MAGIC, raw, associated_data)
+        return self.write(image_id, jpeg, associated_data)
 
     def delete(self, image_id: UUID) -> bool:
         """Remove an image file; False if it was not there."""
