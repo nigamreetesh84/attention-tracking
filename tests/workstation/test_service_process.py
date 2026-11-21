@@ -6,6 +6,7 @@ import signal
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -32,7 +33,11 @@ FACTORY = "ag_workstation.fakes.service:fake_engine_factory"
 @pytest.fixture
 def transport() -> Iterator[PipeTransport]:
     path = Path(tempfile.mkdtemp(prefix="agproc"))
-    yield PipeTransport(str(path / "e.sock"), AUTHKEY)
+    if sys.platform == "win32":
+        # multiprocessing on Windows has named pipes, not AF_UNIX sockets.
+        yield PipeTransport(rf"\\.\pipe\agproc-{uuid.uuid4().hex}", AUTHKEY)
+    else:
+        yield PipeTransport(str(path / "e.sock"), AUTHKEY)
     shutil.rmtree(path, ignore_errors=True)
 
 
@@ -64,7 +69,7 @@ def test_killing_the_engine_process_restores_monitoring(transport: PipeTransport
         pid = supervisor.health().pid
         assert pid is not None
 
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, getattr(signal, "SIGKILL"))  # noqa: B009 - attribute missing on Windows
         restored = _wait(
             lambda: supervisor.health().restarts == 1 and client.ping() is CallStatus.OK,
             limit=20.0,
@@ -97,7 +102,7 @@ def test_frozen_engine_process_is_replaced(transport: PipeTransport) -> None:
         )
         pid = supervisor.health().pid
         assert pid is not None
-        os.kill(pid, signal.SIGSTOP)
+        os.kill(pid, getattr(signal, "SIGSTOP"))  # noqa: B009 - attribute missing on Windows
         restored = _wait(
             lambda: supervisor.health().restarts == 1 and client.ping() is CallStatus.OK,
             limit=20.0,
@@ -143,6 +148,7 @@ def test_resolve_factory_rejects_non_callables() -> None:
 def test_launcher_validates_factory_and_start_method(transport: PipeTransport) -> None:
     with pytest.raises(ValueError):
         ProcessLauncher("bad", transport)
-    assert ProcessLauncher(FACTORY, transport, start_method="forkserver") is not None
     if sys.platform != "win32":
+        # Windows has only the spawn start method.
+        assert ProcessLauncher(FACTORY, transport, start_method="forkserver") is not None
         assert ProcessLauncher(FACTORY, transport, start_method="fork") is not None

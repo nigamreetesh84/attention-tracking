@@ -11,9 +11,10 @@ import contextlib
 import ctypes
 import importlib
 import multiprocessing
+import sys
 import time
 from collections.abc import Callable
-from multiprocessing.context import ForkContext, ForkServerContext, SpawnContext
+from multiprocessing.context import BaseContext
 from multiprocessing.process import BaseProcess
 from typing import Final, Literal, Protocol
 
@@ -101,12 +102,24 @@ class ProcessChild:
 StartMethod = Literal["spawn", "fork", "forkserver"]
 
 
-def _context(method: StartMethod) -> SpawnContext | ForkContext | ForkServerContext:
-    if method == "fork":
-        return multiprocessing.get_context("fork")
-    if method == "forkserver":
-        return multiprocessing.get_context("forkserver")
-    return multiprocessing.get_context("spawn")
+def _context(method: StartMethod) -> tuple[BaseContext, Callable[..., BaseProcess]]:
+    """The context and its process class.
+
+    Typed as `BaseContext` because the fork contexts do not exist on Windows;
+    the process class is returned separately since `BaseContext` does not
+    declare `Process`.
+    """
+    if sys.platform != "win32":
+        if method == "fork":
+            fork = multiprocessing.get_context("fork")
+            return fork, fork.Process
+        if method == "forkserver":
+            server = multiprocessing.get_context("forkserver")
+            return server, server.Process
+    elif method != "spawn":
+        raise ValueError(f"start method {method!r} is not available on Windows")
+    spawn = multiprocessing.get_context("spawn")
+    return spawn, spawn.Process
 
 
 class ProcessLauncher:
@@ -124,12 +137,12 @@ class ProcessLauncher:
         self._factory_path = factory_path
         self._transport = transport
         self._interval = heartbeat_interval_s
-        self._ctx = _context(start_method)
+        self._ctx, self._process_cls = _context(start_method)
 
     def launch(self) -> ProcessChild:
         """Start a child process."""
         counter: _Counter = self._ctx.RawValue(ctypes.c_uint64, 0)
-        process = self._ctx.Process(
+        process = self._process_cls(
             target=engine_child_main,
             args=(counter, self._factory_path, self._transport, self._interval),
             name="ag-engine",

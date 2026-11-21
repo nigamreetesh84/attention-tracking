@@ -2,9 +2,11 @@
 
 import shutil
 import socket
+import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +47,9 @@ def sock_dir() -> Iterator[Path]:
 
 @pytest.fixture
 def transport(sock_dir: Path) -> PipeTransport:
+    if sys.platform == "win32":
+        # multiprocessing on Windows has named pipes, not AF_UNIX sockets.
+        return PipeTransport(rf"\\.\pipe\agipc-{uuid.uuid4().hex}", AUTHKEY)
     return PipeTransport(str(sock_dir / "e.sock"), AUTHKEY)
 
 
@@ -174,10 +179,11 @@ def test_timeout_is_configurable(
         IpcClient(transport, FakeClock(), timeout_s=0)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX socket behaviour (POSIX only)")
 def test_frozen_server_handshake_times_out(sock_dir: Path) -> None:
     """A listener that never answers the auth challenge (frozen process)."""
     path = str(sock_dir / "frozen.sock")
-    raw = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    raw = socket.socket(getattr(socket, "AF_UNIX"), socket.SOCK_STREAM)  # noqa: B009 - POSIX only
     raw.bind(path)
     raw.listen(4)
     client = IpcClient(PipeTransport(path, AUTHKEY), FakeClock())
@@ -248,8 +254,9 @@ def test_server_crash_gives_unavailable_then_recovers(
         again.stop()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX socket behaviour (POSIX only)")
 def test_stale_socket_file_is_replaced(transport: PipeTransport, engine: FakeStationEngine) -> None:
-    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale = socket.socket(getattr(socket, "AF_UNIX"), socket.SOCK_STREAM)  # noqa: B009 - POSIX only
     stale.bind(transport.address)  # a crashed engine leaves its socket file behind
     stale.close()
     srv = IpcServer(transport, engine)
@@ -573,9 +580,13 @@ def test_transport_rules() -> None:
     t = PipeTransport("\\\\.\\pipe\\AttentionGuard-engine", b"k" * MIN_AUTHKEY_BYTES)
     assert t.family == "AF_PIPE"
     assert "k" * 16 not in repr(t)
-    assert default_address("ui").endswith("attentionguard-ui.sock")
+    if sys.platform == "win32":
+        assert default_address("ui") == "\\\\.\\pipe\\AttentionGuard-ui"
+    else:
+        assert default_address("ui").endswith("attentionguard-ui.sock")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX socket behaviour (POSIX only)")
 def test_transport_does_not_unlink_regular_files(sock_dir: Path) -> None:
     path = sock_dir / "notasocket"
     path.write_text("keep")
