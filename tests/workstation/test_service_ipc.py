@@ -336,10 +336,16 @@ def test_oversized_request_drops_only_that_connection(
 ) -> None:
     conn = transport.connect()
     try:
-        conn.send_bytes(b"x" * (p.MAX_MESSAGE_BYTES + 1))
-        assert conn.poll(1.0)
-        with pytest.raises((EOFError, OSError)):
-            conn.recv_bytes()
+        try:
+            conn.send_bytes(b"x" * (p.MAX_MESSAGE_BYTES + 1))
+        except BrokenPipeError:
+            # Windows named pipes: the server drops the connection while the
+            # oversized message is still being written, so the write fails.
+            pass
+        else:
+            assert conn.poll(1.0)
+            with pytest.raises((EOFError, OSError)):
+                conn.recv_bytes()
     finally:
         conn.close()
     assert client.ping() is CallStatus.OK
