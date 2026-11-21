@@ -32,3 +32,5 @@ deploy/secrets/
 .vscode/
 
 /models/
+
+*.bundle
