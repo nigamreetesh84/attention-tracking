@@ -38,10 +38,16 @@ def test_readyz_ok_with_real_postgres(pg_dsn: str, pg_engine: Engine) -> None:
 
 
 def test_health_routes_are_marked_public() -> None:
+    # 3.5 replaced the placeholder `x-ag-public` extension with the `PUBLIC`
+    # dependency marker; the OpenAPI document shows it as `x-ag-access`.
+    from ag_server.rbac import Access, AccessKind, route_access
+
     app = create_app(load_settings({"AG_ENV": "test", "AG_DATABASE_URL": UNREACHABLE}))
     schema = app.openapi()
+    declared = {r.path: r.declarations for r in route_access(app)}
     for path in ("/healthz", "/readyz"):
-        assert schema["paths"][path]["get"]["x-ag-public"] is True
+        assert schema["paths"][path]["get"]["x-ag-access"] == {"kind": "public"}
+        assert declared[path] == (Access(AccessKind.PUBLIC),)
 
 
 def test_production_start_refused_with_default_secrets() -> None:

@@ -17,11 +17,8 @@ from ag_server.auth.routes import install_auth
 from ag_server.auth.service import AuthPolicy, AuthRuntime, Clock
 from ag_server.crypto import KeyRing, derive_subkey
 from ag_server.db import database_is_up, make_engine
+from ag_server.rbac import PUBLIC, install_rbac
 from ag_server.settings import Settings, load_settings
-
-# Marks a route as intentionally unauthenticated. The permission registry and
-# route dependency (task 3.5) will read this; health probes carry no data.
-PUBLIC_MARKER = {"x-ag-public": True}
 
 
 def _utc_now() -> datetime:
@@ -68,13 +65,14 @@ def create_app(
         clock=clock if clock is not None else _utc_now,
     )
     install_auth(app, Translator(DEFAULT_LOCALE, strict=cfg.env == "test"))
+    install_rbac(app)
 
-    @app.get("/healthz", openapi_extra=PUBLIC_MARKER)
+    @app.get("/healthz", dependencies=[PUBLIC])
     def healthz() -> dict[str, str]:
-        """Liveness: the process is up. Never touches the database."""
+        """Liveness: the process is up. Never touches the database. Public: no data."""
         return {"status": "ok"}
 
-    @app.get("/readyz", openapi_extra=PUBLIC_MARKER)
+    @app.get("/readyz", dependencies=[PUBLIC])
     def readyz() -> JSONResponse:
         """Readiness: the database answers."""
         if database_is_up(engine):

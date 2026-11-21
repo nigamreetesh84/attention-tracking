@@ -289,7 +289,7 @@ def test_unauthenticated_requests_are_sent_to_login(env: Env) -> None:
 
 
 def test_bogus_session_cookie_is_ignored(env: Env) -> None:
-    env.client.cookies.set(SESSION_COOKIE, "forged", domain="testserver")
+    env.client.cookies.set(SESSION_COOKIE, "forged")
     assert env.client.get("/").headers["location"] == "/auth/login"
 
 
@@ -302,7 +302,8 @@ def _all_console_get_paths(app: FastAPI) -> list[str]:
     paths = []
     for path, ops in app.openapi()["paths"].items():
         op = ops.get("get")
-        if op is None or op.get("x-ag-public") or path.startswith("/auth/") or "{" in path:
+        public = op is not None and op.get("x-ag-access", {}).get("kind") == "public"
+        if op is None or public or path.startswith("/auth/") or "{" in path:
             continue
         paths.append(path)
     return paths
@@ -361,7 +362,7 @@ def test_admin_enrollment_flow(env: Env) -> None:
     assert full and full != partial
     assert env.client.get("/test/whoami").json()["mfa_passed"] is True
     stale = env.new_client()
-    stale.cookies.set(SESSION_COOKIE, partial or "", domain="testserver")
+    stale.cookies.set(SESSION_COOKIE, partial or "")
     assert stale.get("/").headers["location"] == "/auth/login"
 
     with Session(env.engine) as db:
@@ -618,7 +619,7 @@ def test_login_rotates_any_existing_session(env: Env) -> None:
     second = session_cookie(env.client)
     assert first and second and first != second
     stale = env.new_client()
-    stale.cookies.set(SESSION_COOKIE, first, domain="testserver")
+    stale.cookies.set(SESSION_COOKIE, first)
     assert stale.get("/").headers["location"] == "/auth/login"
 
 
@@ -640,7 +641,7 @@ def test_logout_revokes_the_session_and_clears_the_cookie(env: Env) -> None:
     cleared = next(h for h in set_cookie_headers(r) if h.startswith(SESSION_COOKIE + "="))
     assert "max-age=0" in cleared.lower()
     stale = env.new_client()
-    stale.cookies.set(SESSION_COOKIE, token or "", domain="testserver")
+    stale.cookies.set(SESSION_COOKIE, token or "")
     assert stale.get("/").headers["location"] == "/auth/login"
     assert "auth.logout" in actions(env, sup.user_id)
 
@@ -771,11 +772,14 @@ def test_rotate_issues_a_new_id_and_keeps_the_absolute_limit(env: Env) -> None:
         token = ConsoleAuth(env.app.state.auth, db).rotate(before, ip=PEER[0], user_agent=None)
     assert token != before.token
     rotated = env.new_client()
-    rotated.cookies.set(SESSION_COOKIE, token, domain="testserver")
+    rotated.cookies.set(SESSION_COOKIE, token)
     after = _session_for(env, rotated)
     assert after.expires_at == before.expires_at
+    # Control: a cookie set this way is sent (3.5 found that `domain="testserver"`
+    # made httpx drop it, so the stale checks passed without sending anything).
+    assert rotated.get("/").status_code == 200
     stale = env.new_client()
-    stale.cookies.set(SESSION_COOKIE, before.token, domain="testserver")
+    stale.cookies.set(SESSION_COOKIE, before.token)
     assert stale.get("/").headers["location"] == "/auth/login"
 
 

@@ -2,8 +2,8 @@
 
 Routes: `GET/POST /auth/login`, `GET/POST /auth/mfa/verify`,
 `GET/POST /auth/mfa/enroll`, `POST /auth/logout`, and a placeholder console
-home `GET /`. The login routes are public (`x-ag-public`); everything else
-depends on `pending_session` or `current_session`.
+home `GET /`. The login routes are `PUBLIC`; the MFA steps and logout are
+`signed_in(pending_ok=True)`; the home page is `signed_in()` (task 3.5).
 """
 
 from __future__ import annotations
@@ -25,8 +25,6 @@ from ag_server.auth.deps import (
     MfaPendingError,
     NotAuthenticatedError,
     Runtime,
-    current_session,
-    pending_session,
 )
 from ag_server.auth.service import ConsoleAuth, ConsoleSession, MfaOutcome, NextStep
 from ag_server.auth.sessions import (
@@ -37,8 +35,8 @@ from ag_server.auth.sessions import (
     set_host_cookie,
     tokens_equal,
 )
+from ag_server.rbac import PUBLIC, signed_in
 
-PUBLIC: Final = {"x-ag-public": True}
 _TEMPLATES: Final = Path(__file__).parent / "templates"
 # The console has no inline scripts or styles and no third-party assets.
 _CSP: Final = (
@@ -47,8 +45,8 @@ _CSP: Final = (
 )
 _MAX_FIELD: Final = 1024
 
-Pending = Annotated[ConsoleSession, Depends(pending_session)]
-Current = Annotated[ConsoleSession, Depends(current_session)]
+Pending = Annotated[ConsoleSession, Depends(signed_in(pending_ok=True))]
+Current = Annotated[ConsoleSession, Depends(signed_in())]
 
 
 class Pages:
@@ -111,13 +109,13 @@ def _login_page(pages: Pages, *, status: int = 200, error: str | None = None) ->
 router = APIRouter()
 
 
-@router.get("/auth/login", openapi_extra=PUBLIC, response_class=HTMLResponse)
+@router.get("/auth/login", dependencies=[PUBLIC], response_class=HTMLResponse)
 def login_form(pages: PagesDep) -> HTMLResponse:
     """The sign-in form with a fresh double-submit CSRF token."""
     return _login_page(pages)
 
 
-@router.post("/auth/login", openapi_extra=PUBLIC, response_model=None)
+@router.post("/auth/login", dependencies=[PUBLIC], response_model=None)
 def login_submit(
     request: Request,
     db: DbSession,

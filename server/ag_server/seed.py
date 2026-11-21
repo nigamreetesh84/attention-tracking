@@ -12,6 +12,7 @@ migrations calling this module do not depend on the current model classes.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
@@ -31,37 +32,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ENUM, JSONB
 
-# docs/security-privacy.md section 2. "assigned lines" and "own only" grant the
-# key; the scope filter (task 3.5) narrows it.
-SYSTEM_ROLE_PERMISSIONS: Final[MappingProxyType[str, tuple[str, ...]]] = MappingProxyType(
-    {
-        "admin": (
-            "alerts.manage",
-            "audit.view",
-            "config.manage",
-            "consent.manage",
-            "events.review",
-            "evidence.delete.approve",
-            "evidence.delete.request",
-            "evidence.view",
-            "live.view",
-            "reports.view",
-            "scan",
-            "system.manage",
-            "users.manage",
-            "workers.assign",
-        ),
-        "supervisor": (
-            "alerts.manage",
-            "events.review",
-            "evidence.view",
-            "live.view",
-            "reports.view",
-            "workers.assign",
-        ),
-        "workstation_user": ("reports.view", "scan"),
-    }
-)
+from ag_server.rbac.permissions import system_role_permissions
+
+# docs/security-privacy.md section 2, from the permission registry (the single
+# source). "assigned lines" and "own only" grant the key; the scope filter
+# narrows it.
+SYSTEM_ROLE_PERMISSIONS: Final[Mapping[str, tuple[str, ...]]] = system_role_permissions()
 
 # Display names from docs/scope-v1.md 4.3 (the console translates by kind).
 BUILTIN_PROFILE_NAMES: Final[MappingProxyType[PpeProfileKind, str]] = MappingProxyType(
