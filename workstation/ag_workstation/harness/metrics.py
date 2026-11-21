@@ -11,6 +11,7 @@
   `FAIRNESS_GAP_POINTS` below the overall recall.
 """
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
@@ -101,7 +102,11 @@ class StateMetrics(BaseModel):
     @property
     def mean_latency_s(self) -> float | None:
         """Mean detection latency."""
-        return sum(self.latencies_s) / len(self.latencies_s) if self.latencies_s else None
+        if not self.latencies_s:
+            return None
+        # fsum, not sum: sum() of floats is compensated only from Python 3.12,
+        # so on 3.11 the baseline would differ in the last digit.
+        return math.fsum(self.latencies_s) / len(self.latencies_s)
 
     @property
     def max_latency_s(self) -> float | None:
@@ -159,7 +164,7 @@ def false_alarms(truth: Timeline, predicted: Timeline, tolerance_s: float) -> tu
         for p in episodes(predicted, state):
             if not any(_overlaps(t, p, tolerance_s) for t in flagged):
                 count += 1
-    attentive = sum(s.end - s.start for s in truth if s.state is AttentionState.ATTENTIVE)
+    attentive = math.fsum(s.end - s.start for s in truth if s.state is AttentionState.ATTENTIVE)
     return count, attentive
 
 
@@ -263,10 +268,10 @@ def aggregate(results: Iterable[RecordingResult]) -> Aggregate:
                 out[pred_state] = out.get(pred_state, 0) + n
     return Aggregate(
         recordings=len(items),
-        duration_s=sum(r.duration_s for r in items),
+        duration_s=math.fsum(r.duration_s for r in items),
         states=states,
         false_alarms=sum(r.false_alarms for r in items),
-        attentive_s=sum(r.attentive_s for r in items),
+        attentive_s=math.fsum(r.attentive_s for r in items),
         confusion=matrix,
     )
 

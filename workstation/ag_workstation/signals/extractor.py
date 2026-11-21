@@ -16,6 +16,8 @@ Validity rules:
   worker slumped over the bench has none), only a usable frame.
 """
 
+import math
+
 from ag_shared.config import CameraConfig
 from ag_shared.ppe import PpeProfile
 from ag_shared.signals import SignalFrame, SignalName, SignalReading
@@ -217,9 +219,9 @@ class SignalExtractor:
         blink_closed = (
             p.use_blink_blendshape
             and len(blinks) == len(ears)
-            and sum(blinks) / len(blinks) >= p.blink_closed_score
+            and math.fsum(blinks) / len(blinks) >= p.blink_closed_score
         )
-        return sum(ears) / len(ears), blink_closed
+        return math.fsum(ears) / len(ears), blink_closed
 
     def _eye_signals(
         self,

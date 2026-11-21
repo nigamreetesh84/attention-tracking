@@ -282,7 +282,7 @@ class MotionTracker:
             or newest - oldest < self._min_fill * self._window_s - _EPS
         ):
             return SignalReading.invalid()
-        mean = sum(speed for _, speed in self._speeds) / len(self._speeds)
+        mean = math.fsum(speed for _, speed in self._speeds) / len(self._speeds)
         return SignalReading(value=mean)
 
     def _speed(self, ts: float, points: TrackedPoints) -> float | None:
@@ -299,4 +299,4 @@ class MotionTracker:
         ]
         if not speeds or not all(map(math.isfinite, speeds)):
             return None
-        return sum(speeds) / len(speeds)
+        return math.fsum(speeds) / len(speeds)

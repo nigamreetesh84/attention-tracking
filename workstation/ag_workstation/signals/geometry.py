@@ -47,7 +47,7 @@ def mouth_aspect_ratio(mouth: MouthPoints, aspect: float) -> float | None:
     if width < _EPS:
         return None
     gaps = [distance(up, low, aspect) for up, low in zip(mouth.upper, mouth.lower, strict=True)]
-    return sum(gaps) / (len(gaps) * width)
+    return math.fsum(gaps) / (len(gaps) * width)
 
 
 def point_in_polygon(point: Point, polygon: Sequence[RoiPoint]) -> bool:

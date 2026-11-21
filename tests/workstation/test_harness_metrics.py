@@ -154,3 +154,13 @@ def test_fairness_flags_a_slice_more_than_5_points_below() -> None:
     assert by_value["i-iii"].flagged_states == ()
     assert by_value["iv-vi"].flagged_states == (A.SLEEPING,)
     assert by_value["iv-vi"].metrics.recordings == 2
+
+
+def test_mean_latency_is_the_same_on_every_python_version() -> None:
+    # Python 3.12 made sum() of floats compensated; 3.11 gives
+    # 5.699999999999999 for these latencies, so the committed baseline only
+    # matched on 3.12+. The mean must be correctly rounded on every version.
+    metrics = StateMetrics(
+        labelled=8, detected=8, latencies_s=(4.2, 8.2, 4.2, 8.2, 4.2, 4.2, 4.2, 8.2)
+    )
+    assert metrics.mean_latency_s == 5.7
