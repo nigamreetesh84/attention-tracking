@@ -442,10 +442,19 @@ def test_session_source_exception_closes(gate: CaptureGate, sessions: Sessions) 
 
 
 def test_bad_timezone_closes(sessions: Sessions, clock: FakeClock) -> None:
-    gate = CaptureGate(
-        sessions=sessions, bundles=StaticRosterSource(bundle(timezone="Mars/Olympus")), clock=clock
+    # Since Phase 1 (1.7) a bundle with an unknown zone fails validation, so the
+    # bad zone is injected after validation to keep testing the gate's own guard.
+    good = bundle()
+    bad = good.model_copy(
+        update={"site": good.site.model_copy(update={"timezone": "Mars/Olympus"})}
     )
+    gate = CaptureGate(sessions=sessions, bundles=StaticRosterSource(bad), clock=clock)
     assert gate.decide_live().reason is GateReason.ERROR
+
+
+def test_bundle_with_unknown_timezone_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Mars/Olympus"):
+        bundle(timezone="Mars/Olympus")
 
 
 def test_engine_signal_exception_closes(sessions: Sessions, roster: StaticRosterSource) -> None:

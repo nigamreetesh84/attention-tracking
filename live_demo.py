@@ -52,7 +52,9 @@ def main() -> None:
         engine = Engine(config, provider_factory=lambda cam: MediaPipeLandmarkProvider(models))
 
     engine.start()
-    print("Running. Look at the camera, close your eyes for 5 s, look away, walk off. Ctrl+C stops.")
+    print(
+        "Running. Look at the camera, close your eyes for 5 s, look away, walk off. Ctrl+C stops."
+    )
     try:
         end = time.monotonic() + args.seconds
         while time.monotonic() < end:
@@ -66,7 +68,11 @@ def main() -> None:
                 f"scan_would_be={engine.scan_decision().outcome.value}"
             )
             for event in engine.drain_events():
-                print("  event:", type(event).__name__, getattr(event, "episode", None) and event.episode.state.value)
+                print(
+                    "  event:",
+                    type(event).__name__,
+                    getattr(event, "episode", None) and event.episode.state.value,
+                )
     except KeyboardInterrupt:
         pass
     finally:

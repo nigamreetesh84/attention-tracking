@@ -64,7 +64,11 @@ def main() -> int:
 
     step("Grab frames from the camera")
     index = int(args.camera) if args.camera.isdigit() else args.camera
-    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW) if isinstance(index, int) else cv2.VideoCapture(index)
+    cap = (
+        cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        if isinstance(index, int)
+        else cv2.VideoCapture(index)
+    )
     frames = []
     for _ in range(30):
         ok, image = cap.read()
@@ -75,12 +79,17 @@ def main() -> int:
         print("No frame could be read from the camera.")
         return 1
     image = frames[-1]
-    print(f"{len(frames)} frames, shape {image.shape}, dtype {image.dtype}, mean brightness {image.mean():.0f}")
+    print(
+        f"{len(frames)} frames, shape {image.shape}, dtype {image.dtype}, "
+        f"mean brightness {image.mean():.0f}"
+    )
 
     step("Run the face model (raw MediaPipe)")
     try:
         rgb = np.ascontiguousarray(image[:, :, ::-1])
-        result = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), 1)
+        result = landmarker.detect_for_video(
+            mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), 1
+        )
         print("faces found:", len(result.face_landmarks))
     except Exception:
         traceback.print_exc()
@@ -89,11 +98,16 @@ def main() -> int:
     step("Run the AttentionGuard provider")
     try:
         from ag_workstation.capture.types import Frame
-        from ag_workstation.landmarks.mediapipe_provider import MediaPipeLandmarkProvider, model_paths
+        from ag_workstation.landmarks.mediapipe_provider import (
+            MediaPipeLandmarkProvider,
+            model_paths,
+        )
 
         provider = MediaPipeLandmarkProvider(model_paths(args.models))
         for i, img in enumerate(frames[-5:]):
-            frame = Frame(camera_slot=1, seq=i + 1, ts=i / 15, captured_at=datetime.now(UTC), image=img)
+            frame = Frame(
+                camera_slot=1, seq=i + 1, ts=i / 15, captured_at=datetime.now(UTC), image=img
+            )
             try:
                 res = provider.detect(frame)
                 print(f"frame {i}: faces={len(res.faces)}")
