@@ -1,0 +1,96 @@
+# AttentionGuard server stack: postgres, app, worker, TLS proxy.
+#   cp .env.example .env ; create the files listed in secrets/README.md
+#   docker compose -f deploy/docker-compose.yml up -d
+# Only the proxy publishes ports. Secrets are files, never environment values.
+
+name: attentionguard
+
+x-app-env: &app-env
+  AG_ENV: production
+  AG_DATABASE_URL_FILE: /run/secrets/ag_database_url
+  AG_KEK_FILE: /run/secrets/ag_kek
+  AG_JWT_SIGNING_KEY_FILE: /run/secrets/ag_jwt_signing_key
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: attentionguard
+      POSTGRES_USER: attentionguard
+      POSTGRES_PASSWORD_FILE: /run/secrets/ag_db_password
+    secrets: [ag_db_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U attentionguard -d attentionguard"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [backend]
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: attentionguard-server:latest
+    restart: unless-stopped
+    environment: *app-env
+    secrets: [ag_database_url, ag_kek, ag_jwt_signing_key]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks: [backend]
+
+  worker:
+    image: attentionguard-server:latest
+    command: ["python", "-m", "ag_server.worker"]
+    restart: unless-stopped
+    environment: *app-env
+    secrets: [ag_database_url, ag_kek, ag_jwt_signing_key]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    networks: [backend]
+
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      AG_HOSTNAME: ${AG_HOSTNAME:-localhost}
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [backend]
+
+networks:
+  backend: {}
+
+volumes:
+  pgdata: {}
+  caddy_data: {}
+  caddy_config: {}
+
+secrets:
+  ag_db_password:
+    file: ./secrets/ag_db_password
+  ag_database_url:
+    file: ./secrets/ag_database_url
+  ag_kek:
+    file: ./secrets/ag_kek
+  ag_jwt_signing_key:
+    file: ./secrets/ag_jwt_signing_key

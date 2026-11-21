@@ -1,0 +1,18 @@
+# TLS reverse proxy. Caddy issues a certificate from its internal CA by default,
+# which suits a site with its own CA; for a public name remove `tls internal`
+# (automatic ACME), or point `tls` at certificate files from your CA.
+{$AG_HOSTNAME:localhost} {
+	tls internal
+
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy app:8000
+}

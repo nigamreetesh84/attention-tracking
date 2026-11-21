@@ -1,0 +1,11 @@
+.git
+.venv
+**/__pycache__
+tests
+docs
+workstation
+deploy/secrets
+deploy/.env
+test-videos
+data
+evidence

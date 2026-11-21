@@ -47,6 +47,7 @@ dev = [
     "mypy",
     "pip-audit",
     "hypothesis",
+    "pyyaml",  # deploy file tests
 ]
 
 [tool.setuptools.packages.find]
@@ -88,5 +89,5 @@ mypy_path = ["shared", "workstation", "server"]
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["cv2", "cv2.*", "mediapipe", "mediapipe.*", "win32api", "win32crypt", "win32service", "win32serviceutil", "win32event", "servicemanager", "pywintypes"]
+module = ["yaml", "cv2", "cv2.*", "mediapipe", "mediapipe.*", "win32api", "win32crypt", "win32service", "win32serviceutil", "win32event", "servicemanager", "pywintypes"]
 ignore_missing_imports = true

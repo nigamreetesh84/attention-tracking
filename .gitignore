@@ -14,7 +14,8 @@ htmlcov/
 .env
 .env.*
 !.env.example
-deploy/secrets/
+deploy/secrets/*
+!deploy/secrets/README.md
 
 # local data: never commit images, videos, queues or databases
 *.sqlite
