@@ -2,8 +2,15 @@
 
 `PipeTransport` uses `multiprocessing.connection`: a named pipe (AF_PIPE) on
 Windows, a Unix domain socket elsewhere. Both ends prove knowledge of a shared
-`authkey` (HMAC challenge) before any message is read. Only `send_bytes` and
-`recv_bytes` are used, never the pickling `send`/`recv`.
+`authkey` (HMAC challenge, mutual) before any message is read. Only
+`send_bytes` and `recv_bytes` are used, never the pickling `send`/`recv`.
+
+The server side accepts raw connections and runs the challenge separately
+(`IpcListener.authenticate`, 2.R): `multiprocessing`'s own `Listener.accept`
+runs it on the accepting thread with no deadline, so one local process that
+connects and stays silent blocked every later connection. Here the
+challenge runs on the connection's own thread and every read in it has a
+deadline (`HANDSHAKE_TIMEOUT_S`).
 """
 
 import contextlib
@@ -11,13 +18,23 @@ import os
 import stat
 import sys
 import tempfile
-from multiprocessing.connection import Client, Listener
+import time
+from multiprocessing import AuthenticationError
+from multiprocessing.connection import (
+    Client,
+    Connection,
+    Listener,
+    answer_challenge,
+    deliver_challenge,
+)
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final, Protocol, cast
 
 from ag_workstation.service.protocol import MAX_MESSAGE_BYTES
 
 MIN_AUTHKEY_BYTES: Final = 16
+HANDSHAKE_TIMEOUT_S: Final = 1.0
+"""Longest a connecting client may take to answer the auth challenge."""
 _PIPE_PREFIX: Final = "\\\\.\\pipe\\"
 
 
@@ -45,7 +62,11 @@ class IpcListener(Protocol):
     """A bound server endpoint."""
 
     def accept(self) -> IpcConnection:
-        """Wait for, authenticate and return the next connection."""
+        """Wait for the next connection (not yet authenticated)."""
+        ...
+
+    def authenticate(self, conn: IpcConnection, timeout_s: float) -> None:
+        """Run the auth handshake on `conn` within `timeout_s`; raises on failure."""
         ...
 
     def close(self) -> None:
@@ -73,6 +94,45 @@ def default_address(name: str = "engine") -> str:
     return str(Path(base) / f"attentionguard-{name}.sock")
 
 
+class _Deadline:
+    """A connection whose reads fail once `deadline` (monotonic) has passed."""
+
+    def __init__(self, conn: IpcConnection, deadline: float) -> None:
+        self._conn = conn
+        self._deadline = deadline
+
+    def send_bytes(self, buf: bytes) -> None:
+        self._conn.send_bytes(buf)
+
+    def recv_bytes(self, maxlength: int | None = None) -> bytes:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0 or not self._conn.poll(remaining):
+            raise AuthenticationError("IPC handshake timed out")
+        return self._conn.recv_bytes(maxlength)
+
+
+class _HandshakeListener:
+    """`Listener` without its built-in handshake; `authenticate` runs it with a deadline."""
+
+    def __init__(self, listener: Listener, authkey: bytes) -> None:
+        self._listener = listener
+        self._authkey = authkey
+
+    def accept(self) -> IpcConnection:
+        conn: IpcConnection = self._listener.accept()
+        return conn
+
+    def authenticate(self, conn: IpcConnection, timeout_s: float) -> None:
+        # The same mutual challenge `Listener.accept` runs, in the same order.
+        # Both functions only call send_bytes/recv_bytes, which _Deadline has.
+        wrapped = cast(Connection, _Deadline(conn, time.monotonic() + timeout_s))
+        deliver_challenge(wrapped, self._authkey)
+        answer_challenge(wrapped, self._authkey)
+
+    def close(self) -> None:
+        self._listener.close()
+
+
 class PipeTransport:
     """`multiprocessing.connection` with an authkey. Picklable (plain fields)."""
 
@@ -94,7 +154,8 @@ class PipeTransport:
             with contextlib.suppress(FileNotFoundError):
                 if stat.S_ISSOCK(path.lstat().st_mode):
                     path.unlink()
-        return Listener(self.address, family=self.family, authkey=self._authkey)
+        # No authkey here: the handshake runs in `authenticate`, off the accept thread.
+        return _HandshakeListener(Listener(self.address, family=self.family), self._authkey)
 
     def connect(self) -> IpcConnection:
         """Connect and authenticate."""
@@ -102,6 +163,7 @@ class PipeTransport:
 
 
 __all__ = [
+    "HANDSHAKE_TIMEOUT_S",
     "MAX_MESSAGE_BYTES",
     "MIN_AUTHKEY_BYTES",
     "IpcConnection",

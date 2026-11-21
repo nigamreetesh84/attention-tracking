@@ -303,8 +303,14 @@ def test_wrong_pin_is_a_generic_failure(rig: AuthRig) -> None:
     assert result.attempts_remaining == 4
     assert rig.manager.current() is None
     assert rig.records.of_type(EventType.SESSION_START) == []
+    # 2.R H5: the roster user id of a known worker, never the typed text.
     assert _alerts(rig) == [
-        {"event": "worker_login_failed", "method": PIN_METHOD_NAME, "employee_id": "emp001"}
+        {
+            "event": "worker_login_failed",
+            "method": PIN_METHOD_NAME,
+            "user_id": str(W1),
+            "known_worker": True,
+        }
     ]
 
 
@@ -1138,3 +1144,38 @@ def test_assignment_expiry_is_judged_on_server_time(
     # Already expired on server time: refused at arrival.
     late = _assign(minutes=30, assignment=None)
     assert rig.manager.handle_assign_worker(late) is CommandOutcome.EXPIRED
+
+
+# -- 2.R H5: the failed-login audit never carries what was typed -------------------
+
+
+@pytest.mark.parametrize("typed", ["482913", "4829", "GHOST9"])
+def test_failed_login_audit_for_an_unknown_id_carries_no_typed_text(
+    rig: AuthRig, typed: str
+) -> None:
+    """A PIN typed into the employee-ID field must not reach the server audit log."""
+    for _ in range(5):
+        _login(rig, typed, "0000")
+    alerts = _alerts(rig)
+    assert [a["event"] for a in alerts] == ["worker_login_failed"] * 4 + ["worker_login_locked"]
+    for alert in alerts:
+        assert alert == {
+            "event": alert["event"],
+            "method": PIN_METHOD_NAME,
+            "user_id": None,
+            "known_worker": False,
+        }
+    for rec in rig.records.of_type(EventType.LOCAL_ALERT):
+        assert typed.casefold() not in rec.payload.model_dump_json().casefold()
+
+
+def test_failed_login_audit_for_an_inactive_worker_names_the_account(rig: AuthRig) -> None:
+    _login(rig, "EMP003", "9999")
+    assert _alerts(rig) == [
+        {
+            "event": "worker_login_failed",
+            "method": PIN_METHOD_NAME,
+            "user_id": str(W3),
+            "known_worker": True,
+        }
+    ]

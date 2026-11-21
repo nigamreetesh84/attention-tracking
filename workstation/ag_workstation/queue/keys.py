@@ -106,7 +106,18 @@ class DpapiKeyProvider:
         machine_scope: bool = True,
         crypt_loader: Callable[[], Win32Crypt] = _load_win32crypt,
         randbytes: Callable[[int], bytes] = secrets.token_bytes,
+        magic: bytes | None = None,
+        entropy: bytes | None = None,
+        description: str | None = None,
+        kind: str = "queue",
     ) -> None:
+        """`magic`, `entropy` and `description` default to the queue data key's;
+        another key (the IPC authkey) passes its own, so key files cannot be
+        swapped between purposes."""
+        self._magic = magic or self.MAGIC
+        self._entropy = entropy or self.ENTROPY
+        self._description = description or self.DESCRIPTION
+        self._kind = kind
         self._path = Path(key_path)
         self._flags = self.CRYPTPROTECT_UI_FORBIDDEN | (
             self.CRYPTPROTECT_LOCAL_MACHINE if machine_scope else 0
@@ -135,11 +146,11 @@ class DpapiKeyProvider:
 
     def _load(self, crypt: Win32Crypt) -> bytes:
         raw = self._path.read_bytes()
-        if not raw.startswith(self.MAGIC):
-            raise KeyUnavailableError(f"{self._path} is not a queue key file")
+        if not raw.startswith(self._magic):
+            raise KeyUnavailableError(f"{self._path} is not a {self._kind} key file")
         try:
             _, key = crypt.CryptUnprotectData(
-                raw[len(self.MAGIC) :], self.ENTROPY, None, None, self._flags
+                raw[len(self._magic) :], self._entropy, None, None, self._flags
             )
         except Exception as exc:  # pywin32 raises pywintypes.error; nothing else to catch by type
             raise KeyUnavailableError(f"DPAPI could not unwrap the key in {self._path}") from exc
@@ -149,13 +160,15 @@ class DpapiKeyProvider:
 
     def _create(self, crypt: Win32Crypt) -> bytes:
         key = self._randbytes(DATA_KEY_BYTES)
-        blob = crypt.CryptProtectData(key, self.DESCRIPTION, self.ENTROPY, None, None, self._flags)
+        blob = crypt.CryptProtectData(
+            key, self._description, self._entropy, None, None, self._flags
+        )
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_name(f"{self._path.name}.{secrets.token_hex(8)}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
         try:
             with os.fdopen(fd, "wb") as fh:
-                fh.write(self.MAGIC + bytes(blob))
+                fh.write(self._magic + bytes(blob))
                 fh.flush()
                 os.fsync(fh.fileno())
             try:

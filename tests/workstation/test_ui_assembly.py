@@ -1,6 +1,7 @@
 """UI assembly against the service's engine child over IPC (2.9-pre wiring, no Qt)."""
 
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
@@ -13,14 +14,16 @@ import pytest
 from ag_shared.api import ImagesWithheld
 from ag_shared.config import EngineConfig
 from ag_shared.states import AttentionState
-from ag_workstation.auth import StaticRosterSource
+from ag_workstation.auth import PIN_METHOD_NAME, PinCredentials, StaticRosterSource
 from ag_workstation.clock import FakeClock, SystemClock
 from ag_workstation.consent import CaptureOutcome, GateReason
 from ag_workstation.engine_api import BurstKind, ConfigApplyResult
 from ag_workstation.fakes import FakeStationEngine
+from ag_workstation.queue import EventQueue, InMemoryKeyProvider
+from ag_workstation.queue.keys import KeyUnavailableError
 from ag_workstation.service import IpcClient, IpcServer, PipeTransport
 from ag_workstation.service.station import BurstStatus, PushedSession
-from ag_workstation.ui.app import DEV_EMPLOYEE_ID, DEV_PIN, assemble, dev_bundle
+from ag_workstation.ui.app import DEV_EMPLOYEE_ID, DEV_PIN, Assembly, assemble, dev_bundle
 from argon2 import PasswordHasher
 
 AUTHKEY = b"u" * 32
@@ -130,3 +133,144 @@ def test_without_a_control_client_bursts_are_dropped_not_raised(tmp_path: Path) 
     _wait(lambda: not built.presenter.tick().scan.scans_pending)
     assert built.presenter.tick().scan.last_item_text.endswith("SCAN1")
     built.close()
+
+
+# -- 2.R C1/H6: the scan screen starts and records whatever storage does -------------
+
+KEY = bytes(range(32))
+
+
+class BrokenKeys:
+    """DPAPI cannot unwrap the key file (R6: disk moved, image cloned)."""
+
+    def data_key(self) -> bytes:
+        raise KeyUnavailableError("DPAPI could not unwrap the key")
+
+
+def _scan(built: Assembly, code: str) -> None:
+    built.presenter.key(f"{code}\r")
+    _wait(lambda: not built.presenter.tick().scan.scans_pending)
+
+
+def _queued(data_dir: Path) -> list[dict[str, object]]:
+    queue = EventQueue.open(data_dir / "queue.db", InMemoryKeyProvider(KEY), FakeClock())
+    try:
+        return [{"type": r.type, **r.payload} for r in queue.claim_batch(max_items=200)]
+    finally:
+        queue.close()
+
+
+def test_scans_are_recorded_without_a_data_key_and_sealed_at_the_next_start(
+    tmp_path: Path,
+) -> None:
+    built = assemble(
+        data_dir=tmp_path, dev=False, clock=FakeClock(), keys=BrokenKeys(), hasher=FAST_HASHER
+    )
+    try:
+        _scan(built, "NOKEY-1")
+        assert built.flow is not None
+        health = built.flow.health()
+        assert health.records_lost == 0
+        assert health.journal_backlog == 1
+        assert "data_key_unavailable" in built.degraded
+    finally:
+        built.close()
+    clear = tmp_path / "scan-clear.jnl"
+    assert b"NOKEY-1" in clear.read_bytes()  # the bounded plaintext case
+    # Next start with the key: sealed into the queue, plaintext erased.
+    again = assemble(
+        data_dir=tmp_path,
+        dev=False,
+        clock=FakeClock(),
+        keys=InMemoryKeyProvider(KEY),
+        hasher=FAST_HASHER,
+    )
+    again.close()
+    assert clear.stat().st_size == 0
+    assert [i["barcode"] for i in _queued(tmp_path) if i["type"] == "scan"] == ["NOKEY-1"]
+
+
+def test_scans_are_recorded_when_the_queue_cannot_open(tmp_path: Path) -> None:
+    (tmp_path / "queue.db").write_bytes(b"this is not a database" * 100)
+    built = assemble(
+        data_dir=tmp_path,
+        dev=False,
+        clock=FakeClock(),
+        keys=InMemoryKeyProvider(KEY),
+        hasher=FAST_HASHER,
+    )
+    try:
+        _scan(built, "NOQUEUE-1")
+        assert built.flow is not None
+        assert built.flow.health().records_lost == 0
+        assert built.flow.health().journal_backlog == 1
+        assert "queue_unavailable" in built.degraded
+    finally:
+        built.close()
+    assert b"NOQUEUE-1" not in (tmp_path / "scan.jnl").read_bytes()  # sealed
+    (tmp_path / "queue.db").unlink()
+    assemble(
+        data_dir=tmp_path,
+        dev=False,
+        clock=FakeClock(),
+        keys=InMemoryKeyProvider(KEY),
+        hasher=FAST_HASHER,
+    ).close()
+    assert [i["barcode"] for i in _queued(tmp_path) if i["type"] == "scan"] == ["NOQUEUE-1"]
+
+
+def test_scans_are_recorded_when_the_journal_and_auth_store_cannot_open(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "scan.jnl").mkdir()
+    (tmp_path / "auth.db").mkdir()
+    built = assemble(
+        data_dir=tmp_path,
+        dev=False,
+        clock=FakeClock(),
+        keys=InMemoryKeyProvider(KEY),
+        roster=StaticRosterSource(dev_bundle(FAST_HASHER.hash(DEV_PIN))),
+        hasher=FAST_HASHER,
+    )
+    try:
+        assert {"journal_unavailable", "auth_store_unavailable"} <= set(built.degraded)
+        assert built.manager is not None
+        login = built.manager.login(PIN_METHOD_NAME, PinCredentials(DEV_EMPLOYEE_ID, DEV_PIN))
+        assert login.session is not None  # in-memory lockout store
+        _scan(built, "NOJOURNAL-1")
+    finally:
+        built.close()
+    assert [i["barcode"] for i in _queued(tmp_path) if i["type"] == "scan"] == ["NOJOURNAL-1"]
+
+
+def test_session_records_fall_back_to_the_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2.R H6: a session_start the queue refused is journaled and recovered, so
+    the session's scans are not orphaned on the server."""
+    built = assemble(
+        data_dir=tmp_path,
+        dev=False,
+        clock=FakeClock(),
+        keys=InMemoryKeyProvider(KEY),
+        roster=StaticRosterSource(dev_bundle(FAST_HASHER.hash(DEV_PIN))),
+        hasher=FAST_HASHER,
+    )
+    try:
+        original = EventQueue.enqueue
+
+        def locked(self: EventQueue, *args: object, **kwargs: object) -> object:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(EventQueue, "enqueue", locked)
+        assert built.manager is not None and built.flow is not None
+        login = built.manager.login(PIN_METHOD_NAME, PinCredentials(DEV_EMPLOYEE_ID, DEV_PIN))
+        assert login.session is not None
+        assert built.flow.health().journal_backlog == 1
+        monkeypatch.setattr(EventQueue, "enqueue", original)
+        assert built.flow.recover_journal().enqueued == 1
+        assert built.recovery is not None  # and it runs by itself while the app runs
+    finally:
+        built.close()
+    starts = [i for i in _queued(tmp_path) if i["type"] == "session_start"]
+    assert len(starts) == 1

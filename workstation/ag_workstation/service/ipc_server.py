@@ -25,7 +25,12 @@ from ag_workstation.engine_api import (
 )
 from ag_workstation.service import protocol as p
 from ag_workstation.service.station import PushedSession, StationControl
-from ag_workstation.service.transport import IpcConnection, IpcListener, IpcTransport
+from ag_workstation.service.transport import (
+    HANDSHAKE_TIMEOUT_S,
+    IpcConnection,
+    IpcListener,
+    IpcTransport,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +63,9 @@ class IpcServer:
         control: StationControl | None = None,
         max_clients: int = 16,
         event_backlog: int = EVENT_BACKLOG,
+        handshake_timeout_s: float = HANDSHAKE_TIMEOUT_S,
     ) -> None:
+        self._handshake_timeout = handshake_timeout_s
         self._transport = transport
         self._engine = engine
         self._control = control
@@ -204,8 +211,10 @@ class IpcServer:
             return
         while not self._stop.is_set():
             try:
+                # Raw: the auth handshake runs on the connection's thread, so
+                # a silent client cannot hold up the next one (2.R).
                 conn = listener.accept()
-            except Exception as exc:  # bad handshakes must not end the loop
+            except Exception as exc:  # accept errors must not end the loop
                 if self._stop.is_set():
                     return
                 logger.info("IPC connection refused: %s", type(exc).__name__)
@@ -225,6 +234,18 @@ class IpcServer:
             thread.start()
 
     def _serve(self, conn: IpcConnection) -> None:
+        listener = self._listener
+        try:
+            if listener is None:
+                raise OSError("server stopped")
+            listener.authenticate(conn, self._handshake_timeout)
+        except Exception as exc:  # wrong key, silent or broken client
+            logger.info("IPC connection refused: %s", type(exc).__name__)
+            with self._lock:
+                self._clients.discard(conn)
+            with contextlib.suppress(Exception):
+                conn.close()
+            return
         try:
             while not self._stop.is_set():
                 if not conn.poll(_POLL_S):

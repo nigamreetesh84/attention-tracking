@@ -4,6 +4,7 @@ import pytest
 from ag_workstation.clock import FakeClock
 from ag_workstation.scan import (
     MAX_BARCODE_CHARS,
+    SHORT_CODE_CHARS,
     HidScannerInput,
     KeyboardWedgeParser,
     ScannerInput,
@@ -170,3 +171,26 @@ def test_wedge_parser_is_a_scanner_input(parser: KeyboardWedgeParser) -> None:
     scanner: ScannerInput = parser
     scanner.start()
     scanner.stop()
+
+
+def test_short_codes_are_accepted_and_counted_by_default(
+    parser: KeyboardWedgeParser, clock: FakeClock
+) -> None:
+    """2.R open item 5: a 1-2 character code at scanner speed is recorded (rule 1:
+    a real scan is never rejected); it is counted so a site can see how often
+    it happens before choosing a minimum length."""
+    assert WedgeConfig().min_length == 1
+    assert _burst(parser, clock, "7\r") == ["7"]
+    assert _burst(parser, clock, "AB\r") == ["AB"]
+    assert _burst(parser, clock, "ABC\r") == ["ABC"]
+    stats = parser.stats()
+    assert (stats.accepted, stats.short_codes, stats.rejected_short) == (3, 2, 0)
+    assert SHORT_CODE_CHARS == 3
+
+
+def test_short_code_threshold_is_configurable(clock: FakeClock) -> None:
+    parser = KeyboardWedgeParser(clock, WedgeConfig(short_code_chars=5))
+    assert _burst(parser, clock, "ABCD\r") == ["ABCD"]
+    assert parser.stats().short_codes == 1
+    with pytest.raises(ValueError):
+        WedgeConfig(short_code_chars=0)

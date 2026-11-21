@@ -605,3 +605,54 @@ def _any_state() -> StationState:
     return StationState(
         AttentionState.ATTENTIVE, 0.9, False, datetime(2026, 1, 1, tzinfo=UTC), 1.0, "e", 1
     )
+
+
+# -- 2.R H1: a half-open connection must not block the others --------------------
+
+
+def test_half_open_connection_does_not_block_new_clients(
+    transport: PipeTransport, engine: FakeStationEngine
+) -> None:
+    """A local process that connects and never answers the auth challenge used to
+    hold the single accept thread forever, so every later client timed out."""
+    from multiprocessing.connection import Client
+
+    server = IpcServer(transport, engine, handshake_timeout_s=0.3)
+    server.start()
+    silent = Client(transport.address, family=transport.family)  # no authkey: never answers
+    try:
+        client = IpcClient(transport, FakeClock(), timeout_s=1.0)
+        try:
+            res, elapsed = _timed(client.query_scan_state)
+            assert res.status is CallStatus.OK
+            assert elapsed < 0.9
+        finally:
+            client.close()
+        # The silent connection is dropped once its handshake time is up.
+        assert silent.poll(2.0)
+        silent.recv_bytes()  # the challenge
+        deadline = time.monotonic() + 2.0
+        with pytest.raises((EOFError, OSError)):
+            while time.monotonic() < deadline:
+                if silent.poll(0.05):
+                    silent.recv_bytes()
+            raise AssertionError("server kept the half-open connection")
+    finally:
+        silent.close()
+        server.stop()
+
+
+def test_wrong_key_still_refused_with_deferred_handshake(
+    transport: PipeTransport, server: IpcServer
+) -> None:
+    other = PipeTransport(transport.address, b"z" * 32)
+    client = IpcClient(other, FakeClock(), timeout_s=0.5)
+    try:
+        assert client.ping() is not CallStatus.OK
+    finally:
+        client.close()
+    good = IpcClient(transport, FakeClock(), timeout_s=0.5)
+    try:
+        assert good.ping() is CallStatus.OK
+    finally:
+        good.close()

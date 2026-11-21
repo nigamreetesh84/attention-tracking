@@ -15,6 +15,7 @@ from ag_workstation.scan.flow import (
 )
 from ag_workstation.scan.input import (
     MAX_BARCODE_CHARS,
+    SHORT_CODE_CHARS,
     BarcodeHandler,
     HidScannerInput,
     KeyboardWedgeParser,
@@ -31,6 +32,7 @@ from ag_workstation.scan.query import BoundedStateQuery, QueryAnswer, QueryStatu
 __all__ = [
     "CAPTURE_FAILED",
     "MAX_BARCODE_CHARS",
+    "SHORT_CODE_CHARS",
     "BarcodeHandler",
     "BoundedStateQuery",
     "Cancellable",

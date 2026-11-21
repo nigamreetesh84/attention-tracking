@@ -47,7 +47,7 @@ from ag_shared.api import (
     SessionStartPayload,
 )
 from ag_shared.ids import Uuid7Generator
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from ag_workstation.auth.messages import MessageKey
 from ag_workstation.auth.methods import AuthOutcome, LoginMethodRegistry, LoginRequest
@@ -244,7 +244,9 @@ class SessionManager:
             return LoginResult(AuthOutcome.UNAVAILABLE)
 
         if result.outcome in (AuthOutcome.FAILED, AuthOutcome.LOCKED):
-            self._audit_failure(method.name, result.subject, result.newly_locked, result.outcome)
+            self._audit_failure(
+                method.name, result.subject_user_id, result.newly_locked, result.outcome
+            )
         if result.outcome is not AuthOutcome.SUCCESS or result.user is None:
             return LoginResult(
                 result.outcome,
@@ -468,19 +470,28 @@ class SessionManager:
         self._flags.discard(HealthFlag.RECORD_WRITE_FAILED)
 
     def _audit_failure(
-        self, method: str, subject: str | None, newly_locked: bool, outcome: AuthOutcome
+        self, method: str, user_id: UUID | None, newly_locked: bool, outcome: AuthOutcome
     ) -> None:
-        """Queue failed logins and lockouts for the server audit (security-privacy 3)."""
+        """Queue failed logins and lockouts for the server audit (security-privacy 3).
+
+        Contract 4.3 has no login event type, so this is a `local_alert` of
+        kind `other` (2.R decision; proposal: a `login_failure` type). It
+        names the roster user the typed ID matched, or none: the typed text
+        itself never leaves the station, because an unknown ID is often a
+        PIN typed into the ID field (never log PINs)."""
         if outcome is AuthOutcome.LOCKED and not newly_locked:
             return
         event = "worker_login_locked" if newly_locked else "worker_login_failed"
+        detail: dict[str, JsonValue] = {
+            "event": event,
+            "method": method,
+            "user_id": None if user_id is None else str(user_id),
+            "known_worker": user_id is not None,
+        }
         with self._lock:
             self._write(
                 EventType.LOCAL_ALERT,
-                LocalAlertPayload(
-                    kind=LocalAlertKind.OTHER,
-                    detail={"event": event, "method": method, "employee_id": subject},
-                ),
+                LocalAlertPayload(kind=LocalAlertKind.OTHER, detail=detail),
                 self._utc.now(),
             )
 

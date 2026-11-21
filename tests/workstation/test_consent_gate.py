@@ -914,9 +914,18 @@ def test_store_calls_files_write_only_inside_save_frame() -> None:
     )
 
 
+BINARY_WRITERS = {
+    # module: why it may write bytes to disk (2.R: an explicit, reasoned list)
+    "evidence/files.py": "the encrypted evidence image files (the only image writer)",
+    "queue/keys.py": "DPAPI-wrapped key files (data key, IPC key)",
+    "scan/journal.py": "sealed scan journal lines, os.write on an O_APPEND descriptor",
+}
+"""`sync/sealed_file.py` (bundle, credentials) and `corrected_time.py` write
+ASCII text; they hold no frame bytes (see `test_frame_bytes_stay_on_the_evidence_path`)."""
+
+
 def test_no_other_binary_file_writers() -> None:
-    """Images reach disk only through evidence/files.py; keys are the only other binary file."""
-    allowed = {"evidence/files.py", "queue/keys.py"}
+    """Images reach disk only through evidence/files.py; the other binary writers are listed."""
     found = set()
     for rel, tree in _sources():
         for node in ast.walk(tree):
@@ -926,9 +935,39 @@ def test_no_other_binary_file_writers() -> None:
                 "tofile",
             ):
                 found.add(rel)
+            # os.write takes raw bytes (2.R: the old guard did not see it).
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "write"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+            ):
+                found.add(rel)
             if isinstance(node, ast.Constant) and node.value in ("wb", "ab", "xb", "w+b", "r+b"):
                 found.add(rel)
-    assert found <= allowed, found - allowed
+    assert found <= set(BINARY_WRITERS), found - set(BINARY_WRITERS)
+
+
+FRAME_BYTE_READERS = {
+    "engine_api.py": "defines EvidenceFrame (validation, hash, size)",
+    "evidence/ring.py": "the in-memory ring (size accounting)",
+    "evidence/burst.py": "assembles bursts from ring frames",
+    "evidence/store.py": "writes permitted frames through EncryptedImageFiles",
+    "sync/client.py": "uploads a stored image read back from the store",
+}
+
+
+def test_frame_bytes_stay_on_the_evidence_path() -> None:
+    """2.R: frame bytes (`.jpeg`) are touched only by the listed modules, so no
+    other writer (journal, sealed files, record store) can receive them."""
+    users = {
+        rel
+        for rel, tree in _sources()
+        if not rel.startswith("capture/")
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr == "jpeg"
+    }
+    assert users <= set(FRAME_BYTE_READERS), users - set(FRAME_BYTE_READERS)
 
 
 # -- property: no file appears while the gate is closed ---------------------------

@@ -47,6 +47,7 @@ from ag_workstation.scan import (
     text,
 )
 from ag_workstation.scan.flow import _clean_signals
+from ag_workstation.scan.journal import UnavailableQueue
 from pydantic import BaseModel, JsonValue
 
 KEY = bytes(range(32))
@@ -891,3 +892,27 @@ def test_bounded_query_thread_start_failure(monkeypatch: pytest.MonkeyPatch) -> 
     answer = query.ask()
     assert answer.status is QueryStatus.ERROR
     assert query.in_flight == 0
+
+
+def test_clear_journal_writes_raise_a_health_flag(tmp_path: Path) -> None:
+    """2.R M2: plaintext journal lines are visible to health, not only counted."""
+    clock = FakeClock(start_utc=T0)
+    journal = ScanJournal.open(tmp_path / "scan-clear.jnl")  # no data key
+    engine = FakeStationEngine(clock)
+    flags: list[HealthFlag] = []
+    flow = ScanFlow(
+        queue=UnavailableQueue(),
+        journal=journal,
+        engine=engine,
+        evidence=engine,
+        sessions=FakeSessions(_session()),
+        clock=clock,
+        scheduler=ManualScheduler(),
+        on_health_flag=flags.append,
+    )
+    result = flow.on_barcode("ITEM-CLEAR")
+    assert result.persisted
+    assert HealthFlag.JOURNAL_UNENCRYPTED in flags
+    assert flow.health().unencrypted_journal_writes == 2  # the intent and the final item
+    assert flow.health().records_lost == 0
+    journal.close()

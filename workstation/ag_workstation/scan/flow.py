@@ -71,7 +71,7 @@ from ag_workstation.engine_api import (
 )
 from ag_workstation.scan.escalation import EscalationConfig, EscalationCounter
 from ag_workstation.scan.input import MAX_BARCODE_CHARS
-from ag_workstation.scan.journal import ItemQueue, JournalRecovery, ScanJournal
+from ag_workstation.scan.journal import ItemQueue, Journal, JournalRecovery
 from ag_workstation.scan.messages import ScanMessageKey
 from ag_workstation.scan.query import BoundedStateQuery, QueryAnswer, QueryStatus
 
@@ -91,6 +91,8 @@ class HealthFlag(StrEnum):
     """The write-ahead intent or an emergency record could not be journaled."""
     RECORD_LOST = "record_lost"
     """Neither the queue nor the journal took a record."""
+    JOURNAL_UNENCRYPTED = "journal_unencrypted"
+    """A journal line was written in the clear (no key, or sealing failed)."""
 
 
 class Cancellable(Protocol):
@@ -184,6 +186,7 @@ class ScanFlowHealth:
     engine_query_failures: int
     journal_backlog: int
     pending_events: int
+    unencrypted_journal_writes: int = 0
 
 
 @dataclass
@@ -211,7 +214,7 @@ class ScanFlow:
         self,
         *,
         queue: ItemQueue,
-        journal: ScanJournal,
+        journal: Journal,
         engine: StationStateQuery,
         evidence: EvidenceRequester,
         sessions: SessionSource,
@@ -388,7 +391,10 @@ class ScanFlow:
         item_type: str = EventType.SCAN,
     ) -> bool:
         try:
+            before = self._journal.unencrypted_writes
             write(record_id, item_type, occurred_at, payload)
+            if self._journal.unencrypted_writes > before:
+                self._flag(HealthFlag.JOURNAL_UNENCRYPTED)
             return True
         except Exception as exc:
             logger.error("scan journal write failed: %s", type(exc).__name__)
@@ -557,13 +563,15 @@ class ScanFlow:
 
     # -- service hooks -------------------------------------------------------------
 
-    def recover_journal(self) -> JournalRecovery:
-        """Move journaled records to the queue (service start, housekeeping)."""
-        return self._journal.recover(self._queue)
+    def recover_journal(self, *, min_age_s: float = 0.0) -> JournalRecovery:
+        """Move journaled records to the queue (app start; `PeriodicJournalRecovery`
+        with `min_age_s` while scanning)."""
+        return self._journal.recover(self._queue, min_age_s=min_age_s)
 
     def health(self) -> ScanFlowHealth:
         """Counters since start."""
         backlog = self._journal.backlog
+        clear = self._journal.unencrypted_writes
         with self._lock:
             return ScanFlowHealth(
                 scans=self._scans,
@@ -573,6 +581,7 @@ class ScanFlow:
                 engine_query_failures=self._engine_failures,
                 journal_backlog=backlog,
                 pending_events=len(self._pending),
+                unencrypted_journal_writes=clear,
             )
 
     def close(self) -> None:

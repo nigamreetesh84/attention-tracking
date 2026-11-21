@@ -137,13 +137,15 @@ class ServiceHost:
 
 
 AUTHKEY_ENV: Final = "AG_IPC_AUTHKEY"
-"""Hex IPC authkey shared by the service and the UI (storage and ACL: open, 2.3)."""
+"""Development override of the IPC authkey (hex); production uses the DPAPI key
+file `AG_DATA_DIR/keys/ipc.key` (`service.ipc_key`, 2.R)."""
 
 
 def default_service_host(env: Mapping[str, str] | None = None) -> ServiceHost:
     """The production host: the real engine child (`ProcessLauncher.real`) on
-    the default pipe. Raises `ValueError` without a valid `AG_IPC_AUTHKEY`
-    (a configuration error at service start, never on the scan path).
+    the default pipe. Raises `ValueError` without a usable IPC authkey
+    (`AG_IPC_AUTHKEY`, else the DPAPI key file under `AG_DATA_DIR` on Windows;
+    a configuration error at service start, never on the scan path).
 
     With `AG_DATA_DIR` and a data key: engine restart alerts go to the local
     queue (this process is the queue's single sender, so it recovers records
@@ -159,18 +161,19 @@ def default_service_host(env: Mapping[str, str] | None = None) -> ServiceHost:
     from ag_workstation.service.child import ProcessLauncher
     from ag_workstation.service.engine_factory import DATA_DIR_ENV, key_provider_from_env
     from ag_workstation.service.ipc_client import IpcClient
+    from ag_workstation.service.ipc_key import ipc_authkey
     from ag_workstation.service.supervisor import AlertCallback
     from ag_workstation.service.transport import PipeTransport, default_address
     from ag_workstation.sync.wiring import service_components
 
     env = dict(os.environ) if env is None else env
-    authkey = bytes.fromhex(env.get(AUTHKEY_ENV, "").strip())
-    if len(authkey) < 16:
-        raise ValueError(f"{AUTHKEY_ENV} must hold at least 16 bytes (hex)")
-    clock = SystemClock()
-    on_alert: AlertCallback | None = None
     data_raw = env.get(DATA_DIR_ENV, "").strip()
     data_dir = Path(data_raw) if data_raw else None
+    authkey = ipc_authkey(env, data_dir)
+    if authkey is None:
+        raise ValueError(f"no IPC authkey: set {AUTHKEY_ENV} or a usable key file")
+    clock = SystemClock()
+    on_alert: AlertCallback | None = None
     keys = key_provider_from_env(env, data_dir)
     queue: EventQueue | None = None
     if data_dir is not None and keys is not None:
