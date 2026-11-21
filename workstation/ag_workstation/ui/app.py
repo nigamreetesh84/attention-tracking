@@ -24,6 +24,12 @@ With the shared data key (`AG_DATA_KEY`, or DPAPI on Windows) the roster is
 the config bundle the service's sync client stored, kept current by a
 `SyncConsumer` thread that also runs supervisor session commands (2.9).
 Without it the queue key is per run and there is no roster without `--dev`.
+
+"My record" (2.10) reads `PersonalRecordStore` (`AG_DATA_DIR/my_record.db`),
+fed by a `RecordMirror` around the queue that the scan flow and the session
+manager write to (the engine child mirrors its episodes into the same file).
+If the record cannot be opened the screen is not offered; scanning is not
+affected. Disputes are queued here by `DisputeService` (enqueue only).
 """
 
 import argparse
@@ -34,10 +40,11 @@ import tempfile
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from typing import Final
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from ag_shared.api import ConfigBundle
 from ag_shared.config import EngineConfig
@@ -67,6 +74,7 @@ from ag_workstation.engine_api import (
 )
 from ag_workstation.fakes import FakeStationEngine
 from ag_workstation.queue import EventQueue, InMemoryKeyProvider, KeyProvider, PayloadCipher
+from ag_workstation.record import RECORD_FILE, DisputeService, PersonalRecordStore, RecordMirror
 from ag_workstation.scan import KeyboardWedgeParser, ScanFlow, ScanJournal
 from ag_workstation.service import IpcClient, PipeTransport, default_address
 from ag_workstation.service.engine_factory import DATA_DIR_ENV, key_provider_from_env
@@ -77,6 +85,7 @@ from ag_workstation.sync.consumer import SyncConsumer
 from ag_workstation.ui.app_presenter import AppPresenter
 from ag_workstation.ui.backends import SessionManagerBackend
 from ag_workstation.ui.login_presenter import LoginPresenter
+from ag_workstation.ui.record_presenter import RecordPresenter, RecordPresenterConfig
 from ag_workstation.ui.runner import ThreadRunner
 from ag_workstation.ui.scan_presenter import ScanPresenter
 from ag_workstation.ui.status import StatusPoller
@@ -301,6 +310,13 @@ def assemble(
     # process only enqueues and must not reset the sender's in-flight records.
     queue = EventQueue.open(data_dir / "queue.db", keys, clock, recover_sending=not synced)
     closers.append(queue.close)
+    record_store = _open_record(data_dir, keys, clock)
+    # Writers go through the mirror; it closes after them (closers run in reverse).
+    writer: EventQueue | RecordMirror = queue
+    if record_store is not None:
+        closers.append(record_store.close)
+        writer = RecordMirror(queue, record_store)
+        closers.append(writer.close)
     journal = ScanJournal.open(data_dir / "scan.jnl", PayloadCipher(keys))
     closers.append(journal.close)
     auth_state = AuthStateStore.open(data_dir / "auth.db")
@@ -313,7 +329,7 @@ def assemble(
     manager = SessionManager(
         registry=registry,
         roster=roster,
-        records=queue,
+        records=writer,
         engine=fake if fake is not None else (control or AcceptingConfigTarget()),
         state=auth_state,
         clock=clock,
@@ -324,7 +340,7 @@ def assemble(
     # engine child enforces its own gate where the frames are written.
     gate = CaptureGate(sessions=manager, bundles=roster, clock=clock)
     flow = ScanFlow(
-        queue=queue,
+        queue=writer,
         journal=journal,
         engine=engine,
         evidence=evidence,
@@ -366,8 +382,40 @@ def assemble(
         clock=clock,
     )
     login = LoginPresenter(backend=backend, runner=auth_runner, clock=clock)
-    presenter = AppPresenter(scan=scan, login=login, parser=KeyboardWedgeParser(clock))
+    record: RecordPresenter | None = None
+    if record_store is not None:
+        disputes = DisputeService(record_store, queue, clock)
+        disputes.recover()
+        record_runner = ThreadRunner("record")
+        closers.append(record_runner.close)
+        record = RecordPresenter(
+            source=record_store,
+            disputes=disputes,
+            sessions=backend,
+            runner=record_runner,
+            clock=clock,
+            timezone=lambda: _site_timezone(roster),
+            config=RecordPresenterConfig(days_shown=record_store.retention.days),
+        )
+    presenter = AppPresenter(
+        scan=scan, login=login, parser=KeyboardWedgeParser(clock), record=record
+    )
     return Assembly(presenter, mode, fake, closers)
+
+
+def _open_record(data_dir: Path, keys: KeyProvider, clock: Clock) -> PersonalRecordStore | None:
+    """The worker's local record, or None (the "My record" screen is then not offered)."""
+    try:
+        return PersonalRecordStore.open(data_dir / RECORD_FILE, keys, clock)
+    except Exception as exc:
+        logger.error("my record unavailable (%s); screen not offered", type(exc).__name__)
+        return None
+
+
+def _site_timezone(roster: RosterSource) -> tzinfo:
+    """The site timezone from the applied bundle (display only), else UTC."""
+    bundle = roster.current_bundle()
+    return ZoneInfo(bundle.site.timezone) if bundle is not None else UTC
 
 
 def _parse(argv: Sequence[str] | None) -> argparse.Namespace:

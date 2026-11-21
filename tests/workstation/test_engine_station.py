@@ -22,6 +22,7 @@ from ag_workstation.evidence import EvidenceStore
 from ag_workstation.landmarks import FakeLandmarkProvider, LandmarkError
 from ag_workstation.landmarks.types import LandmarkResult
 from ag_workstation.queue import EventQueue, InMemoryKeyProvider
+from ag_workstation.record import RECORD_FILE, PersonalRecordStore
 from ag_workstation.service import PipeTransport, ProcessLauncher
 from ag_workstation.service import engine_factory as ef
 from ag_workstation.service.child import resolve_factory
@@ -226,6 +227,35 @@ def test_episode_and_buckets_are_queued_with_the_session(station: Station) -> No
     assert buckets and all(b["user_id"] == str(USER) for b in buckets)
     # The episode id is the attention event id; no names or employee ids anywhere.
     assert "DEV001" not in json.dumps(records)
+
+
+def test_episodes_also_reach_the_workers_local_record(station: Station) -> None:
+    """2.10: the child mirrors its episodes into `my_record.db` (the UI adds the
+    session row; here it is added by hand)."""
+    station.login()
+    station.run(6.0)
+    station.world.ear = {1: 0.05, 2: 0.05}
+    station.run(6.0)
+    engine = station.child.adapter.engine
+    assert engine is not None
+    sleeping = engine.open_episode()
+    assert sleeping is not None
+    _wait(lambda: station.child.burst_outcome(sleeping.id).status == "done")
+    station.world.ear = {1: 0.30, 2: 0.30}
+    station.run(4.0)
+    station.child.close()
+    record = PersonalRecordStore.open(
+        station.tmp / "data" / RECORD_FILE, InMemoryKeyProvider(KEY), station.clock
+    )
+    try:
+        record.note_session_start(SESSION, USER, T0)
+        events = record.snapshot(USER).events
+        assert sleeping.id in {e.id for e in events}
+        shown = next(e for e in events if e.id == sleeping.id)
+        assert shown.state is A.SLEEPING and shown.images_saved == 1
+        assert record.snapshot(UUID(int=7)).events == ()
+    finally:
+        record.close()
 
 
 def test_episodes_without_a_session_are_not_queued(station: Station) -> None:

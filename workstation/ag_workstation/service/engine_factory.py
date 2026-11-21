@@ -49,6 +49,8 @@ from ag_workstation.evidence.burst import AsyncSink, BurstAssembler
 from ag_workstation.evidence.ring import EvidenceRings, JpegEncoder
 from ag_workstation.landmarks.types import LandmarkError, LandmarkProvider
 from ag_workstation.queue import DpapiKeyProvider, InMemoryKeyProvider, KeyProvider
+from ag_workstation.record import RECORD_FILE, PersonalRecordStore, RecordMirror
+from ag_workstation.scan.journal import ItemQueue
 from ag_workstation.service.station import (
     EngineEventRecorder,
     FanOut,
@@ -222,10 +224,23 @@ def build_station(
 
     sessions = PushedSessions(clock)
     outcomes = OutcomeRegistry(clock)
-    recorder = EngineEventRecorder(queue, sessions, outcomes, clock)
+    recorder_queue: ItemQueue | None = queue
+    record_closers: list[Callable[[], None]] = []
+    if queue is not None and data_dir is not None and keys is not None:
+        # Episodes also go to the worker's local record ("My record", 2.10).
+        try:
+            record_store = PersonalRecordStore.open(data_dir / RECORD_FILE, keys, clock)
+            mirror = RecordMirror(queue, record_store)
+            recorder_queue = mirror
+            record_closers = [record_store.close, mirror.close]
+        except Exception as exc:
+            logger.error("my record unavailable in the engine child (%s)", type(exc).__name__)
+    recorder = EngineEventRecorder(recorder_queue, sessions, outcomes, clock)
     if queue is not None:
-        # Before the queue closes (closers run in reverse): queue waiting episodes.
+        # Before the queue closes (closers run in reverse): queue waiting episodes,
+        # then stop the record mirror, then close the queue.
         closers.insert(1, recorder.flush)
+        closers[1:1] = record_closers
 
     def on_outcome(outcome: CaptureOutcome) -> None:
         outcomes.record(outcome)

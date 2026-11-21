@@ -8,6 +8,12 @@ when it did, the scanner's characters are removed from the form again.
 An unattributed scan opens the login screen (A1). A successful login, a
 session started by a supervisor assignment, Back, or an idle login screen
 return to the scan screen.
+
+"My record" (2.10) opens from the scan screen for the logged-in worker. It
+returns to the scan screen on Back, after its idle time, when the session
+ends or changes (logout, timeout, supervisor command), and when a barcode is
+scanned (the scan is recorded as on every screen, and its warning banner
+must be visible).
 """
 
 from dataclasses import dataclass
@@ -16,6 +22,7 @@ from enum import StrEnum
 from ag_workstation.scan import KeyboardWedgeParser
 from ag_workstation.scan.messages import ScanMessageKey
 from ag_workstation.ui.login_presenter import LoginPresenter, LoginViewModel
+from ag_workstation.ui.record_presenter import RecordPresenter, RecordViewModel
 from ag_workstation.ui.scan_presenter import ScanPresenter, ScanViewModel
 
 
@@ -24,6 +31,7 @@ class Screen(StrEnum):
 
     SCAN = "scan"
     LOGIN = "login"
+    RECORD = "record"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,16 +41,26 @@ class AppViewModel:
     screen: Screen
     scan: ScanViewModel
     login: LoginViewModel
+    record: RecordViewModel | None = None
+    """None when the station has no local record (the screen is not offered)."""
+    record_available: bool = False
+    """Show the "My record" action (a worker is logged in and the record exists)."""
 
 
 class AppPresenter:
     """Owns the scan and login presenters. UI thread only."""
 
     def __init__(
-        self, *, scan: ScanPresenter, login: LoginPresenter, parser: KeyboardWedgeParser
+        self,
+        *,
+        scan: ScanPresenter,
+        login: LoginPresenter,
+        parser: KeyboardWedgeParser,
+        record: RecordPresenter | None = None,
     ) -> None:
         self.scan = scan
         self.login = login
+        self.record = record
         self._parser = parser
         self._parser.set_handler(None)  # barcodes are taken from `feed`'s return value
         self._screen = Screen.SCAN
@@ -64,6 +82,8 @@ class AppPresenter:
                 self.login.discard_scanned_input()
             else:
                 self.login.key(text)
+        elif self._screen is Screen.RECORD and codes:
+            self.close_record()
 
     def show_login(self) -> None:
         """The login action on the scan screen."""
@@ -73,6 +93,20 @@ class AppPresenter:
     def cancel_login(self) -> None:
         """Back from the login screen."""
         self.login.reset()
+        self._switch(Screen.SCAN)
+
+    def show_record(self) -> None:
+        """The "My record" action on the scan screen (logged-in worker only)."""
+        session = self.scan.session
+        if self.record is None or session is None:
+            return
+        self._switch(Screen.RECORD)
+        self.record.open(session)
+
+    def close_record(self) -> None:
+        """Back from "My record"; forgets what it showed."""
+        if self.record is not None:
+            self.record.close()
         self._switch(Screen.SCAN)
 
     def logout(self) -> None:
@@ -102,4 +136,22 @@ class AppPresenter:
             self.login.reset()
             self._switch(Screen.SCAN)
             login = self.login.tick()
-        return AppViewModel(self._screen, scan, login)
+        if self._screen is Screen.RECORD and self._record_should_close():
+            self.close_record()
+        record = self.record.tick() if self.record is not None else None
+        return AppViewModel(
+            self._screen,
+            scan,
+            login,
+            record,
+            record_available=self.record is not None and self.scan.logged_in,
+        )
+
+    def _record_should_close(self) -> bool:
+        session = self.scan.session
+        return (
+            self.record is None
+            or session is None
+            or session.session_id != self.record.session_id
+            or self.record.idle()
+        )
