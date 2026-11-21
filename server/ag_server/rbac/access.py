@@ -7,8 +7,9 @@ Every route declares exactly one of:
   with the request's `Scope`. No session -> login (401 for non-GET/HTMX),
   MFA still owed -> MFA step (403), inactive user or workstation-user role
   -> no session, permission missing -> 403.
-- `PUBLIC` (`dependencies=[PUBLIC]`): no authentication; only health probes
-  and the sign-in form.
+- `PUBLIC` (`dependencies=[PUBLIC]`): no session or token; only health
+  probes, the sign-in form, and device `/enroll` and `/token` (whose
+  credential, an enrollment token or a device secret, is in the body).
 - `device(authenticate)`: a device-token route (task 3.6). The marker wraps
   the authenticating dependency, so it cannot be applied without it.
 - `signed_in()` / `signed_in(pending_ok=True)`: a console session with no

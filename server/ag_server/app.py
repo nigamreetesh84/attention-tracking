@@ -17,6 +17,7 @@ from ag_server.auth.routes import install_auth
 from ag_server.auth.service import AuthPolicy, AuthRuntime, Clock
 from ag_server.crypto import KeyRing, derive_subkey
 from ag_server.db import database_is_up, make_engine
+from ag_server.devices import DevicePolicy, install_devices
 from ag_server.rbac import PUBLIC, install_rbac
 from ag_server.settings import Settings, load_settings
 
@@ -30,11 +31,13 @@ def create_app(
     *,
     clock: Clock | None = None,
     password_hasher: PasswordHasher | None = None,
+    device_policy: DevicePolicy | None = None,
 ) -> FastAPI:
     """Build the app. Settings are validated here, so an unsafe production config never starts.
 
-    `clock` and `password_hasher` are injection points for tests (a fake clock,
-    cheaper argon2 parameters); production uses UTC now and the defaults.
+    `clock`, `password_hasher` and `device_policy` are injection points for
+    tests (a fake clock, cheaper argon2 parameters, other rate limits);
+    production uses UTC now and the defaults.
     """
     cfg = settings if settings is not None else load_settings()
     engine = make_engine(cfg)
@@ -66,6 +69,12 @@ def create_app(
     )
     install_auth(app, Translator(DEFAULT_LOCALE, strict=cfg.env == "test"))
     install_rbac(app)
+    install_devices(
+        app,
+        jwt_key=cfg.jwt_signing_key.get_secret_value(),
+        clock=app.state.auth.clock,
+        policy=device_policy if device_policy is not None else DevicePolicy(),
+    )
 
     @app.get("/healthz", dependencies=[PUBLIC])
     def healthz() -> dict[str, str]:
