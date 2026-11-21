@@ -20,9 +20,10 @@ scan is recorded even with the service dead). The capture gate is asked here
 before a burst is requested (closed: nothing is requested) and enforced
 again in the engine child, which writes the frames.
 
-Not yet release wiring: the queue key is per run unless `AG_DATA_KEY` is set,
-and the roster comes from the synced bundle only once the sync client (2.9)
-exists; until then there is no roster without `--dev`.
+With the shared data key (`AG_DATA_KEY`, or DPAPI on Windows) the roster is
+the config bundle the service's sync client stored, kept current by a
+`SyncConsumer` thread that also runs supervisor session commands (2.9).
+Without it the queue key is per run and there is no roster without `--dev`.
 """
 
 import argparse
@@ -70,6 +71,9 @@ from ag_workstation.scan import KeyboardWedgeParser, ScanFlow, ScanJournal
 from ag_workstation.service import IpcClient, PipeTransport, default_address
 from ag_workstation.service.engine_factory import DATA_DIR_ENV, key_provider_from_env
 from ag_workstation.service.remote import RemoteEvidence, SessionPusher
+from ag_workstation.sync.commands import INBOX_FILE, CommandInbox, CommandPump
+from ag_workstation.sync.config_store import BundleFileWatcher, bundle_path
+from ag_workstation.sync.consumer import SyncConsumer
 from ag_workstation.ui.app_presenter import AppPresenter
 from ag_workstation.ui.backends import SessionManagerBackend
 from ag_workstation.ui.login_presenter import LoginPresenter
@@ -210,6 +214,36 @@ def _push_station_config(control: IpcClient, roster: RosterSource) -> None:
         logger.warning("engine child did not take the station config (%s)", result.reason)
 
 
+def _sync_consumer(
+    data_dir: Path,
+    clock: Clock,
+    watcher: BundleFileWatcher | None,
+    roster: RosterSource,
+    manager: SessionManager,
+    control: IpcClient | None,
+) -> SyncConsumer | None:
+    """Bundle updates and session commands from the service's sync client."""
+    try:
+        inbox = CommandInbox.open(data_dir / INBOX_FILE, clock)
+    except Exception as exc:
+        logger.error("command inbox unavailable (%s)", type(exc).__name__)
+        return None
+    target = roster if isinstance(roster, StaticRosterSource) else None
+
+    def on_bundle(bundle: ConfigBundle) -> None:
+        if control is not None:
+            _push_station_config(control, roster)
+        manager.on_bundle_applied()
+
+    return SyncConsumer(
+        watcher=watcher if target is not None else None,
+        roster=target if target is not None else StaticRosterSource(),
+        pump=CommandPump(inbox, manager),
+        on_bundle=on_bundle,
+        on_close=inbox.close,
+    )
+
+
 def assemble(
     *,
     data_dir: Path,
@@ -248,14 +282,24 @@ def assemble(
         engine, evidence, mode = UnreachableEngine(), DroppedEvidence(), "unreachable"
 
     hasher = hasher or PasswordHasher()
-    if roster is None:
-        roster = StaticRosterSource(dev_bundle(hasher.hash(DEV_PIN)) if dev else None)
     # Shared with the engine child when configured (AG_DATA_KEY / DPAPI);
     # otherwise a per-run key (the queue is then this run's only).
     keys = keys or key_provider_from_env(os.environ, data_dir if not dev else None)
+    # With the service's shared data key, the roster comes from the bundle
+    # the sync client stored, and session commands from its inbox (2.9).
+    synced = keys is not None and not dev
+    watcher: BundleFileWatcher | None = None
+    if roster is None:
+        static = StaticRosterSource(dev_bundle(hasher.hash(DEV_PIN)) if dev else None)
+        if synced and keys is not None:
+            watcher = BundleFileWatcher(bundle_path(data_dir), keys)
+            static.set_bundle(watcher.poll())
+        roster = static
     if keys is None or dev:
         keys = InMemoryKeyProvider(secrets.token_bytes(32))
-    queue = EventQueue.open(data_dir / "queue.db", keys, clock)
+    # With a shared queue the service parent is the single sender: this
+    # process only enqueues and must not reset the sender's in-flight records.
+    queue = EventQueue.open(data_dir / "queue.db", keys, clock, recover_sending=not synced)
     closers.append(queue.close)
     journal = ScanJournal.open(data_dir / "scan.jnl", PayloadCipher(keys))
     closers.append(journal.close)
@@ -304,6 +348,11 @@ def assemble(
     backend = SessionManagerBackend(
         manager, on_change=pusher.push_now if pusher is not None else None
     )
+    if synced:
+        consumer = _sync_consumer(data_dir, clock, watcher, roster, manager, control)
+        if consumer is not None:
+            consumer.start()
+            closers.append(consumer.close)
 
     scan_runner = ThreadRunner("scan")
     poll_runner = ThreadRunner("poll")

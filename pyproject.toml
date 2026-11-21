@@ -35,6 +35,7 @@ workstation = [
     "opencv-python",
     "mediapipe",
     "numpy",
+    "httpx",  # sync client (PLAN 2.9); also a base dependency, listed so the extra is explicit
     "pywin32; sys_platform == 'win32'",
     "tzdata; sys_platform == 'win32'",
 ]

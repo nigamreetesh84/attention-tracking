@@ -8,7 +8,8 @@ an `EngineEventRecorder` that queues episodes and buckets.
 
 Everything fails open:
 
-- no camera config (`AG_ENGINE_CONFIG` unset or invalid): the engine is not
+- no camera config (`AG_ENGINE_CONFIG` unset or invalid, and no config
+  bundle stored by the sync client under `AG_DATA_DIR`): the engine is not
   started, the state is Unknown and health says `not_configured` until a
   config is applied over IPC;
 - no camera or a camera that cannot be opened: capture reports it offline,
@@ -133,6 +134,23 @@ def load_engine_config(env: Mapping[str, str]) -> EngineConfig | None:
         return None
 
 
+def station_config_from_bundle(data_dir: Path, keys: KeyProvider) -> EngineConfig | None:
+    """The station config of the last bundle the sync client applied (PLAN 2.9).
+
+    None when there is none or it does not build (logged, never raised).
+    """
+    from ag_workstation.sync.config_store import bundle_path, load_bundle
+
+    bundle = load_bundle(bundle_path(data_dir), keys)
+    if bundle is None:
+        return None
+    try:
+        return bundle.engine_config()
+    except Exception as exc:
+        logger.error("stored bundle gives no engine config (%s)", type(exc).__name__)
+        return None
+
+
 def key_provider_from_env(env: Mapping[str, str], data_dir: Path | None) -> KeyProvider | None:
     """The local data key: `AG_DATA_KEY` (development), else DPAPI on Windows."""
     raw = env.get(DATA_KEY_ENV, "").strip()
@@ -184,6 +202,8 @@ def build_station(
     data_raw = env.get(DATA_DIR_ENV, "").strip()
     data_dir = Path(data_raw) if data_raw else None
     keys = keys or key_provider_from_env(env, data_dir)
+    if config is None and data_dir is not None and keys is not None:
+        config = station_config_from_bundle(data_dir, keys)
     queue: EventQueue | None = None
     store: EvidenceStore | None = None
     if data_dir is not None and keys is not None:

@@ -8,7 +8,7 @@ to the child through `IpcClient`.
 
 import logging
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Final, Protocol
@@ -46,8 +46,24 @@ class QueueLocalAlertSink:
         self._queue.enqueue(EventType.LOCAL_ALERT, payload, self._clock.now())
 
 
+class BackgroundService(Protocol):
+    """A component with its own thread (the sync client, PLAN 2.9)."""
+
+    def start(self) -> None:
+        """Start its thread; must return at once."""
+        ...
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """Stop within about `timeout` seconds."""
+        ...
+
+
 class ServiceHost:
-    """Starts the supervisor and ticks it and the housekeeper until stopped."""
+    """Starts the supervisor and ticks it and the housekeeper until stopped.
+
+    `sync` runs on its own thread: the tick thread never waits for the
+    network, so a hung server cannot delay engine supervision.
+    """
 
     def __init__(
         self,
@@ -55,9 +71,13 @@ class ServiceHost:
         housekeeper: Housekeeper | None = None,
         *,
         tick_s: float = TICK_S,
+        sync: BackgroundService | None = None,
+        closers: tuple[Callable[[], None], ...] = (),
     ) -> None:
         self.supervisor = supervisor
         self.housekeeper = housekeeper
+        self.sync = sync
+        self._closers = closers
         self._tick_s = tick_s
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -81,6 +101,11 @@ class ServiceHost:
         self.supervisor.start()
         self._thread = threading.Thread(target=self._run, name="ag-service", daemon=True)
         self._thread.start()
+        if self.sync is not None:
+            try:
+                self.sync.start()
+            except Exception as exc:  # sync is optional; supervision goes on
+                logger.error("sync did not start (%s)", type(exc).__name__)
         logger.info("service host started")
 
     def _run(self) -> None:
@@ -88,12 +113,22 @@ class ServiceHost:
             self.tick()
 
     def stop(self, timeout: float = 2.0) -> None:
-        """Stop ticking and kill the engine child."""
+        """Stop sync and ticking, kill the engine child, close resources."""
+        if self.sync is not None:
+            try:
+                self.sync.stop(timeout)
+            except Exception as exc:
+                logger.warning("sync did not stop cleanly (%s)", type(exc).__name__)
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout)
             self._thread = None
         self.supervisor.stop()
+        for close in reversed(self._closers):
+            try:
+                close()
+            except Exception as exc:
+                logger.warning("closing a service resource failed (%s)", type(exc).__name__)
         logger.info("service host stopped")
 
     def wait(self, timeout: float | None = None) -> bool:
@@ -110,9 +145,11 @@ def default_service_host(env: Mapping[str, str] | None = None) -> ServiceHost:
     the default pipe. Raises `ValueError` without a valid `AG_IPC_AUTHKEY`
     (a configuration error at service start, never on the scan path).
 
-    Engine restart alerts go to the local queue when `AG_DATA_DIR` and a data
-    key are configured (this process is the queue's sender, so it recovers
-    records a crashed sender left `sending`); otherwise they are logged.
+    With `AG_DATA_DIR` and a data key: engine restart alerts go to the local
+    queue (this process is the queue's single sender, so it recovers records
+    a crashed sender left `sending`), housekeeping runs, and the sync client
+    runs on its own thread when `AG_SERVER_URL` is set (PLAN 2.9). Without
+    them alerts are only logged.
     """
     import os
 
@@ -120,8 +157,10 @@ def default_service_host(env: Mapping[str, str] | None = None) -> ServiceHost:
     from ag_workstation.queue import EventQueue
     from ag_workstation.service.child import ProcessLauncher
     from ag_workstation.service.engine_factory import DATA_DIR_ENV, key_provider_from_env
+    from ag_workstation.service.ipc_client import IpcClient
     from ag_workstation.service.supervisor import AlertCallback
     from ag_workstation.service.transport import PipeTransport, default_address
+    from ag_workstation.sync.wiring import service_components
 
     env = dict(os.environ) if env is None else env
     authkey = bytes.fromhex(env.get(AUTHKEY_ENV, "").strip())
@@ -130,12 +169,36 @@ def default_service_host(env: Mapping[str, str] | None = None) -> ServiceHost:
     clock = SystemClock()
     on_alert: AlertCallback | None = None
     data_raw = env.get(DATA_DIR_ENV, "").strip()
-    keys = key_provider_from_env(env, Path(data_raw) if data_raw else None)
-    if data_raw and keys is not None:
+    data_dir = Path(data_raw) if data_raw else None
+    keys = key_provider_from_env(env, data_dir)
+    queue: EventQueue | None = None
+    if data_dir is not None and keys is not None:
         try:
-            queue = EventQueue.open(Path(data_raw) / "queue.db", keys, clock)
+            queue = EventQueue.open(data_dir / "queue.db", keys, clock)
             on_alert = QueueLocalAlertSink(queue, clock)
         except Exception as exc:
             logger.error("local queue unavailable (%s); alerts are logged", type(exc).__name__)
     launcher = ProcessLauncher.real(PipeTransport(default_address(), authkey))
-    return ServiceHost(EngineSupervisor(launcher, clock, on_alert=on_alert))
+    supervisor = EngineSupervisor(launcher, clock, on_alert=on_alert)
+    if queue is None or data_dir is None or keys is None:
+        logger.warning("no local data: sync and housekeeping are off")
+        return ServiceHost(supervisor)
+    # A second client: status reads for the heartbeat never share a
+    # connection with anything on the scan path.
+    state = IpcClient(PipeTransport(default_address(), authkey), clock, timeout_s=0.5)
+    parts = service_components(
+        env,
+        data_dir=data_dir,
+        keys=keys,
+        queue=queue,
+        clock=clock,
+        supervisor=supervisor,
+        state=state,
+        engine_health=state.health,
+    )
+    return ServiceHost(
+        supervisor,
+        parts.housekeeper,
+        sync=parts.sync,
+        closers=(queue.close, state.close, *parts.closers),
+    )
