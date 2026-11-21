@@ -103,6 +103,7 @@ from ag_workstation.sync.config_store import BundleFileWatcher, bundle_path
 from ag_workstation.sync.consumer import SyncConsumer
 from ag_workstation.ui.app_presenter import AppPresenter
 from ag_workstation.ui.backends import SessionManagerBackend
+from ag_workstation.ui.camera_dev import LocalStation, start_local_station
 from ag_workstation.ui.login_presenter import LoginPresenter
 from ag_workstation.ui.record_presenter import RecordPresenter, RecordPresenterConfig
 from ag_workstation.ui.runner import ThreadRunner
@@ -151,8 +152,11 @@ class AcceptingConfigTarget:
         return ConfigApplyResult(True, config.config_version)
 
 
-def dev_bundle(pin_hash: str) -> ConfigBundle:
-    """A one-worker bundle for manual checks (employee `DEV001`)."""
+def dev_bundle(pin_hash: str, camera: str = "0") -> ConfigBundle:
+    """A one-worker bundle for manual checks (employee `DEV001`).
+
+    `camera` is the primary camera: a webcam index or an `rtsp://` URL."""
+    kind = "rtsp" if camera.lower().startswith("rtsp://") else "usb"
     profile = builtin_profile(PpeProfileKind.OPEN_FACE).model_dump(mode="json")
     return ConfigBundle.model_validate(
         {
@@ -165,7 +169,7 @@ def dev_bundle(pin_hash: str) -> ConfigBundle:
                 "line_id": str(_DEV_STATION),
                 "camera_count": 1,
             },
-            "cameras": [{"slot": 1, "role": "primary", "kind": "usb", "uri": "0"}],
+            "cameras": [{"slot": 1, "role": "primary", "kind": kind, "uri": camera}],
             "ppe_profile": profile,
             "thresholds": {},
             "profile_thresholds": [],
@@ -555,7 +559,18 @@ def _parse(argv: Sequence[str] | None) -> argparse.Namespace:
         default=AttentionState.ATTENTIVE.value,
         help="state the fake engine reports",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--camera",
+        default=None,
+        help="with --dev: the real engine on this webcam index or rtsp:// URL",
+    )
+    parser.add_argument(
+        "--models", type=Path, default=None, help="with --camera: folder with face_landmarker.task"
+    )
+    args = parser.parse_args(argv)
+    if args.camera is not None and not args.dev:
+        parser.error("--camera is a manual-check mode and needs --dev")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -573,16 +588,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         or (Path(shared) if shared and not args.dev else None)
         or Path(tempfile.mkdtemp(prefix="attentionguard-ui-"))
     )
-    assembly = assemble(
-        data_dir=data_dir,
-        dev=args.dev,
-        clock=clock,
-        ipc=None if args.dev else _ipc_client(clock, data_dir=data_dir),
-        control=None
-        if args.dev
-        else _ipc_client(clock, timeout_s=CONTROL_TIMEOUT_S, data_dir=data_dir),
-        dev_state=AttentionState(args.dev_state),
-    )
+    local: LocalStation | None = None
+    if args.camera is not None:
+        # Manual check: the real engine on a local camera, in this process,
+        # with the dev roster and a per-run key (see `ui.camera_dev`).
+        keys = InMemoryKeyProvider(secrets.token_bytes(32))
+        local = start_local_station(data_dir=data_dir, models=args.models, keys=keys, clock=clock)
+        assembly = assemble(
+            data_dir=data_dir,
+            dev=False,
+            clock=clock,
+            ipc=local.ipc,
+            control=local.control,
+            roster=StaticRosterSource(
+                dev_bundle(PasswordHasher().hash(DEV_PIN), camera=args.camera)
+            ),
+            keys=keys,
+        )
+    else:
+        assembly = _assemble_from_args(args, data_dir, clock)
     logger.info("engine source: %s; data in %s", assembly.engine_mode, data_dir)
     app = QApplication.instance() or QApplication([])
     window = MainWindow(assembly.presenter, sound=SoundPlayer(args.sound))
@@ -594,6 +618,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(app.exec())
     finally:
         assembly.close()
+        if local is not None:
+            local.close()
+
+
+def _assemble_from_args(args: argparse.Namespace, data_dir: Path, clock: Clock) -> Assembly:
+    """The normal launch: the service over IPC, or the fake engine with --dev."""
+    return assemble(
+        data_dir=data_dir,
+        dev=args.dev,
+        clock=clock,
+        ipc=None if args.dev else _ipc_client(clock, data_dir=data_dir),
+        control=None
+        if args.dev
+        else _ipc_client(clock, timeout_s=CONTROL_TIMEOUT_S, data_dir=data_dir),
+        dev_state=AttentionState(args.dev_state),
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
